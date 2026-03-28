@@ -1,0 +1,14 @@
+[Unit]
+Description=Matrix VoIP Agent for OpenClaw
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/node %h/matrix-voip-agent/dist/index.js
+WorkingDirectory=%h/matrix-voip-agent
+Restart=always
+RestartSec=5
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,26 @@
+{
+  "name": "matrix-voip-agent",
+  "version": "0.1.0",
+  "description": "Headless Matrix WebRTC voice call agent for OpenClaw",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "werift": "^0.22.2",
+    "@discordjs/opus": "^0.9.0",
+    "matrix-js-sdk": "^34.0.0",
+    "@matrix-org/matrix-sdk-crypto-nodejs": "^0.4.0",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^22.0.0"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
