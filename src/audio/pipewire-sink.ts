@@ -21,7 +21,7 @@ export class PipeWireSink {
 
     this.proc = spawn("pw-play", [
       `--target=${this.target}`,
-      "--format=s16le",
+      "--format=s16",
       "--rate=48000",
       "--channels=1",
       "--latency=50ms",
