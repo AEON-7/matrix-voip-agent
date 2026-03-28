@@ -31,6 +31,7 @@ export function registerCallHandlers(
 
     switch (evType) {
       case "m.call.invite":
+        logger.info(TAG, `Received m.call.invite from ${sender} (age=${event.getLocalAge()}ms)`);
         handleInvite(client, config, callManager, event, room.roomId);
         break;
       case "m.call.candidates":
@@ -58,7 +59,9 @@ function handleInvite(
   const content = event.getContent();
   const sender = event.getSender()!;
 
-  if (content.version !== "1" && content.version !== 1) {
+  logger.info(TAG, `Call invite details: version=${JSON.stringify(content.version)}, call_id=${content.call_id}, has_offer=${!!content.offer?.sdp}`);
+
+  if (content.version !== "1" && content.version !== 1 && content.version !== "0" && content.version !== 0) {
     logger.warn(TAG, `Ignoring call invite with version ${content.version}`);
     return;
   }
@@ -82,9 +85,9 @@ function handleInvite(
   }
 
   // Check invitee filter (multi-device)
+  logger.info(TAG, `Invitee check: content.invitee=${JSON.stringify(content.invitee)}, our deviceName=${config.matrix.deviceName}`);
   if (content.invitee && content.invitee !== config.matrix.deviceName) {
-    logger.debug(TAG, `Invite targeted at different device: ${content.invitee}`);
-    return;
+    logger.warn(TAG, `Invite targeted at different device: ${content.invitee} (we are ${config.matrix.deviceName}), answering anyway`);
   }
 
   const invite: CallInvite = {

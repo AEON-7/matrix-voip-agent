@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "werift": "^0.22.2",
-    "@discordjs/opus": "^0.9.0",
+    "opusscript": "^0.0.8",
     "matrix-js-sdk": "^34.0.0",
     "@matrix-org/matrix-sdk-crypto-nodejs": "^0.4.0",
     "dotenv": "^16.4.0"

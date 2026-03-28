@@ -101,9 +101,11 @@ export class CallManager {
     };
 
     this.activeCalls.set(invite.callId, session);
+    logger.info(TAG, `Attempting to answer call ${invite.callId} from ${invite.sender}`);
 
     try {
       const answerSdp = await session.answer(invite.offerSdp);
+      logger.info(TAG, `Got answer SDP for ${invite.callId}, sending to Matrix`);
       await sendAnswer(
         client,
         invite.roomId,
@@ -111,11 +113,17 @@ export class CallManager {
         this.config.matrix.deviceName,
         answerSdp
       );
-    } catch (err) {
-      logger.error(TAG, `Failed to answer call ${invite.callId}`, err);
+      logger.info(TAG, `Call ${invite.callId} answered successfully`);
+    } catch (err: any) {
+      logger.error(TAG, `Failed to answer call ${invite.callId}: ${err?.message || err}`);
+      logger.error(TAG, `Stack: ${err?.stack || "no stack"}`);
       this.activeCalls.delete(invite.callId);
       session.hangup();
-      await sendHangup(client, invite.roomId, invite.callId, "unknown_error");
+      try {
+        await sendHangup(client, invite.roomId, invite.callId, "unknown_error");
+      } catch (hangupErr: any) {
+        logger.error(TAG, `Failed to send hangup: ${hangupErr?.message}`);
+      }
     }
   }
 
