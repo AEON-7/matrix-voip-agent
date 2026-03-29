@@ -28,6 +28,7 @@ ask() {
 }
 
 TOTAL_STEPS=7
+# Step 7 now includes interactive credential configuration
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WHISPER_DIR="${WHISPER_DIR:-$HOME/whisper.cpp}"
 WHISPER_MODEL="${WHISPER_MODEL:-base}"
@@ -232,9 +233,173 @@ else
   ok "Created .env from template"
 fi
 
-# Validate required vars
+source .env 2>/dev/null || true
+
+# Interactive credential setup (skip in --auto mode if already configured)
+needs_config() {
+  local val="${!1:-}"
+  [ -z "$val" ] || [[ "$val" == YOUR_* ]] || [[ "$val" == your-* ]]
+}
+
+if ! $AUTO; then
+  echo ""
+  echo -e "  ${CYAN}Configure your credentials interactively?${NC}"
+  echo "  (You can always edit .env manually later)"
+  echo ""
+
+  if ask "  Configure now?"; then
+
+    # ── Matrix ──
+    echo ""
+    echo -e "  ${CYAN}── Matrix Homeserver ──${NC}"
+    echo ""
+
+    if needs_config MATRIX_HOMESERVER_URL; then
+      read -p "  Matrix homeserver URL [http://127.0.0.1:8008]: " HS_URL
+      HS_URL="${HS_URL:-http://127.0.0.1:8008}"
+      sed -i "s|^MATRIX_HOMESERVER_URL=.*|MATRIX_HOMESERVER_URL=${HS_URL}|" .env
+      ok "Homeserver: $HS_URL"
+    else
+      ok "Homeserver already set: $MATRIX_HOMESERVER_URL"
+      HS_URL="$MATRIX_HOMESERVER_URL"
+    fi
+
+    if needs_config MATRIX_USER_ID; then
+      read -p "  Bot Matrix user ID (e.g. @mybot:example.com): " BOT_USER
+      if [ -n "$BOT_USER" ]; then
+        sed -i "s|^MATRIX_USER_ID=.*|MATRIX_USER_ID=${BOT_USER}|" .env
+        ok "User ID: $BOT_USER"
+      fi
+    else
+      ok "User ID already set: $MATRIX_USER_ID"
+      BOT_USER="$MATRIX_USER_ID"
+    fi
+
+    if needs_config MATRIX_ACCESS_TOKEN; then
+      echo ""
+      echo "  To generate an access token, you need the bot account's password."
+      read -sp "  Bot account password (leave blank to skip): " BOT_PASS
+      echo ""
+      if [ -n "$BOT_PASS" ]; then
+        USERNAME=$(echo "$BOT_USER" | sed 's/@\(.*\):.*/\1/')
+        TOKEN_RESP=$(curl -sf -X POST "${HS_URL}/_matrix/client/v3/login" \
+          -H 'Content-Type: application/json' \
+          -d "{
+            \"type\": \"m.login.password\",
+            \"identifier\": {\"type\": \"m.id.user\", \"user\": \"${USERNAME}\"},
+            \"password\": \"${BOT_PASS}\",
+            \"device_id\": \"VOIP_AGENT\",
+            \"initial_device_display_name\": \"VoIP Agent\"
+          }" 2>/dev/null || echo "")
+
+        if echo "$TOKEN_RESP" | python3 -c "import sys,json; json.load(sys.stdin)['access_token']" >/dev/null 2>&1; then
+          ACCESS_TOKEN=$(echo "$TOKEN_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+          sed -i "s|^MATRIX_ACCESS_TOKEN=.*|MATRIX_ACCESS_TOKEN=${ACCESS_TOKEN}|" .env
+          ok "Access token generated and saved"
+        else
+          warn "Login failed — check homeserver URL and password"
+          echo "  You can set MATRIX_ACCESS_TOKEN manually in .env"
+        fi
+      else
+        warn "Skipped — set MATRIX_ACCESS_TOKEN in .env manually"
+      fi
+    else
+      ok "Access token already set"
+    fi
+
+    if needs_config AUTHORIZED_USERS; then
+      read -p "  Your Matrix user ID (who can call the bot, e.g. @you:example.com): " AUTH_USER
+      if [ -n "$AUTH_USER" ]; then
+        sed -i "s|^AUTHORIZED_USERS=.*|AUTHORIZED_USERS=${AUTH_USER}|" .env
+        ok "Authorized user: $AUTH_USER"
+      fi
+    else
+      ok "Authorized users already set: $AUTHORIZED_USERS"
+    fi
+
+    # ── LLM ──
+    echo ""
+    echo -e "  ${CYAN}── LLM Server (OpenAI-compatible API) ──${NC}"
+    echo ""
+
+    if needs_config VLLM_BASE_URL; then
+      read -p "  LLM API base URL (e.g. http://localhost:8000/v1 or https://api.openai.com/v1): " LLM_URL
+      if [ -n "$LLM_URL" ]; then
+        sed -i "s|^VLLM_BASE_URL=.*|VLLM_BASE_URL=${LLM_URL}|" .env
+        ok "LLM URL: $LLM_URL"
+      fi
+    else
+      ok "LLM URL already set: $VLLM_BASE_URL"
+    fi
+
+    if needs_config VLLM_API_KEY; then
+      read -sp "  LLM API key: " LLM_KEY
+      echo ""
+      if [ -n "$LLM_KEY" ]; then
+        sed -i "s|^VLLM_API_KEY=.*|VLLM_API_KEY=${LLM_KEY}|" .env
+        ok "LLM API key saved"
+      fi
+    else
+      ok "LLM API key already set"
+    fi
+
+    if needs_config VLLM_MODEL; then
+      read -p "  LLM model name (e.g. gpt-4o, llama-3, qwen-72b): " LLM_MODEL
+      if [ -n "$LLM_MODEL" ]; then
+        sed -i "s|^VLLM_MODEL=.*|VLLM_MODEL=${LLM_MODEL}|" .env
+        ok "LLM model: $LLM_MODEL"
+      fi
+    else
+      ok "LLM model already set: $VLLM_MODEL"
+    fi
+
+    # ── ElevenLabs ──
+    echo ""
+    echo -e "  ${CYAN}── ElevenLabs TTS ──${NC}"
+    echo ""
+
+    if needs_config ELEVENLABS_API_KEY; then
+      read -sp "  ElevenLabs API key: " EL_KEY
+      echo ""
+      if [ -n "$EL_KEY" ]; then
+        sed -i "s|^ELEVENLABS_API_KEY=.*|ELEVENLABS_API_KEY=${EL_KEY}|" .env
+        ok "ElevenLabs API key saved"
+      fi
+    else
+      ok "ElevenLabs API key already set"
+    fi
+
+    if needs_config ELEVENLABS_VOICE_ID; then
+      read -p "  ElevenLabs voice ID: " EL_VOICE
+      if [ -n "$EL_VOICE" ]; then
+        sed -i "s|^ELEVENLABS_VOICE_ID=.*|ELEVENLABS_VOICE_ID=${EL_VOICE}|" .env
+        ok "ElevenLabs voice ID: $EL_VOICE"
+      fi
+    else
+      ok "ElevenLabs voice ID already set: $ELEVENLABS_VOICE_ID"
+    fi
+
+    # ── Optional: API token ──
+    echo ""
+    echo -e "  ${CYAN}── Outbound Call API (optional) ──${NC}"
+    echo ""
+
+    if needs_config API_TOKEN; then
+      GENERATED_TOKEN=$(openssl rand -hex 24 2>/dev/null || python3 -c "import secrets; print(secrets.token_hex(24))" 2>/dev/null || echo "")
+      if [ -n "$GENERATED_TOKEN" ]; then
+        sed -i "s|^API_TOKEN=.*|API_TOKEN=${GENERATED_TOKEN}|" .env
+        ok "API token generated: ${GENERATED_TOKEN:0:8}..."
+      fi
+    else
+      ok "API token already set"
+    fi
+
+  fi
+fi
+
+# ── Final validation ──
 echo ""
-echo "  Checking required environment variables..."
+echo "  Checking all required variables..."
 source .env 2>/dev/null || true
 
 check_var() {
@@ -262,17 +427,27 @@ echo -e "${GREEN}═════════════════════
 echo -e "${GREEN}  Setup complete!${NC}"
 echo -e "${GREEN}════════════════════════════════════════${NC}"
 echo ""
-echo "  Next steps:"
-echo ""
-if ! grep -q "MATRIX_ACCESS_TOKEN=.\+" .env 2>/dev/null; then
-  echo "  1. Generate a Matrix access token (see README)"
-  echo "  2. Fill in all credentials in .env"
-  echo "  3. Run: npm start"
-else
-  echo "  Run: npm start"
+
+# Count missing vars
+source .env 2>/dev/null || true
+MISSING_VARS=0
+for var in MATRIX_USER_ID MATRIX_ACCESS_TOKEN VLLM_BASE_URL VLLM_API_KEY VLLM_MODEL ELEVENLABS_API_KEY ELEVENLABS_VOICE_ID; do
+  val="${!var:-}"
+  if [ -z "$val" ] || [[ "$val" == YOUR_* ]] || [[ "$val" == your-* ]]; then
+    MISSING_VARS=$((MISSING_VARS + 1))
+  fi
+done
+
+if [ "$MISSING_VARS" -gt 0 ]; then
+  echo "  $MISSING_VARS required variable(s) still need to be set."
+  echo "  Edit .env: nano .env"
+  echo ""
 fi
+
+echo "  Start the agent:"
+echo "    npm start"
 echo ""
-echo "  Or install as a service:"
+echo "  Or install as a systemd service:"
 echo "    cp systemd/matrix-voip-agent.service ~/.config/systemd/user/"
 echo "    systemctl --user daemon-reload"
 echo "    systemctl --user enable --now matrix-voip-agent.service"
