@@ -1,143 +1,238 @@
 # matrix-voip-agent
 
-Headless Matrix WebRTC voice call agent with integrated STT/TTS. Auto-answers Matrix VoIP calls, transcribes the caller's speech locally via whisper.cpp, sends transcripts to the AI agent via Matrix, and speaks the agent's responses back using ElevenLabs TTS.
+Headless Matrix WebRTC voice call agent. Auto-answers (and initiates) Matrix VoIP calls with real-time voice conversation powered by local STT, direct LLM inference, and cloud TTS.
 
-Built for [OpenClaw](https://github.com/openclaw) (Celina) but adaptable to any Matrix-based AI agent.
+Call your AI agent from any Matrix client. The agent hears you, thinks, and talks back — all in ~4 seconds.
+
+## Requirements
+
+### System
+
+| Requirement | Minimum | Recommended |
+|---|---|---|
+| **OS** | Linux (PipeWire required) | Ubuntu 24.04+ |
+| **Node.js** | 20+ | 22+ |
+| **CPU** | 4 cores (for whisper.cpp) | 8+ cores |
+| **RAM** | 2 GB (base model) | 4 GB (small model) |
+| **Disk** | 500 MB (base model + deps) | 2 GB (small model + deps) |
+
+### Services
+
+| Service | Purpose | Required? |
+|---|---|---|
+| **Matrix homeserver** | Call signaling (Dendrite, Synapse, Conduit) | Yes |
+| **TURN server** | WebRTC NAT traversal (coturn recommended) | Yes for remote calls |
+| **PipeWire** | Virtual audio routing between WebRTC and STT/TTS | Yes |
+| **LLM server** | AI responses — any OpenAI-compatible API (vLLM, Ollama, OpenAI, etc.) | Yes |
+| **ElevenLabs account** | Text-to-speech (free tier works, starter+ recommended) | Yes |
+
+### API Keys and Accounts
+
+| Account | What you need | Free tier? |
+|---|---|---|
+| **Matrix account** | Bot user account + access token on your homeserver | Self-hosted = free |
+| **LLM provider** | OpenAI-compatible endpoint + API key | Local vLLM/Ollama = free |
+| **ElevenLabs** | API key + voice ID | Yes (limited characters/month) |
+| **OpenAI** *(optional)* | API key for fallback STT | No |
+| **Brave Search** *(optional)* | API key for web search tool | Yes (2000 queries/month) |
+
+### System Packages
+
+Install these before starting:
+
+```bash
+# Ubuntu/Debian
+sudo apt install -y \
+  build-essential cmake git curl \
+  pipewire pipewire-pulse wireplumber \
+  pipewire-audio-client-libraries \
+  ffmpeg \
+  libopus-dev
+
+# Verify PipeWire is running
+pactl info | grep "Server Name"
+# Should show: PipeWire
+```
+
+### Software to Build
+
+| Software | Purpose | Build instructions |
+|---|---|---|
+| **whisper.cpp** | Local speech-to-text | See [Whisper Setup](#whisper-setup) below |
 
 ## Architecture
 
 ```
-Caller (Element) ──Matrix VoIP──> matrix-voip-agent ──> Whisper STT (local)
-                                       │                       │
-                                       │  WebRTC (werift)      │  transcript → Matrix message
-                                       │  Opus ↔ PCM           │
-                                       │  ICE/TURN             │  AI agent responds (text)
-                                       │                       │
-Caller hears agent <──WebRTC──  <── PipeWire <── ElevenLabs TTS <── agent response
-Caller speaks      ──WebRTC──>  ──> PipeWire ──> whisper.cpp ──> transcript ──> Matrix
+┌─────────────────────────────────────────────────────────────┐
+│                    matrix-voip-agent                         │
+│                                                             │
+│  ┌──────────┐   ┌──────────┐   ┌───────┐   ┌───────────┐  │
+│  │ WebRTC   │──>│ PipeWire │──>│Whisper│──>│  LLM API  │  │
+│  │ (werift) │   │ loopback │   │  STT  │   │  (vLLM)   │  │
+│  │          │<──│          │<──│       │<──│           │  │
+│  │ Opus↔PCM │   │ sink/src │   │local  │   │ direct    │  │
+│  └──────────┘   └──────────┘   └───────┘   └─────┬─────┘  │
+│       ↑                                          │        │
+│       │              ┌──────────┐                │        │
+│  ┌────┴────┐         │ElevenLabs│<───────────────┘        │
+│  │ Matrix  │         │   TTS    │                          │
+│  │signaling│         │  (cloud) │                          │
+│  │m.call.* │         └──────────┘                          │
+│  └─────────┘                                               │
+└─────────────────────────────────────────────────────────────┘
+         ↕
+    Matrix homeserver
+    (Dendrite/Synapse)
+         ↕
+    Element / any Matrix client
 ```
 
-### Audio flow in detail
+### Voice conversation flow
 
 ```
-Albert speaks into Element
+You speak into Element (~2 seconds of speech)
        │
-       ▼
-[WebRTC audio stream]
-       │
-       ▼ Opus decode
-[matrix-voip-agent / audio-bridge]
-       │
-       ▼ pw-play (writes raw PCM)
-[openclaw_stt_speaker]  ← PipeWire sink
-       │
-       ▼ PipeWire loopback
-[openclaw_stt_capture]  ← PipeWire source
+       ▼ WebRTC audio stream
+[matrix-voip-agent] Opus decode → PipeWire
        │
        ▼ pw-record (16kHz PCM)
-[voice-pipeline / whisper.cpp STT]
+[whisper.cpp] local STT, ~1.5s (base model)
        │
        ▼ transcript text
-[Matrix room message]  →  AI agent (Celina) sees it
-                                 │
-                                 ▼
-                       Agent generates text response
-                                 │
-                                 ▼
-                       [voice-pipeline / ElevenLabs TTS]  →  PCM audio
-                                 │
-                                 ▼ pw-play (writes PCM)
-                       [openclaw_tts]  ← PipeWire sink
-                                 │
-                                 ▼ PipeWire loopback
-                       [openclaw_tts_mic]  ← PipeWire source
-                                 │
-                                 ▼ pw-record
-                       [matrix-voip-agent / audio-bridge]
-                                 │
-                                 ▼ Opus encode
-                       [WebRTC audio stream]
-                                 │
-                                 ▼
-                       Albert hears Celina in Element
+[vLLM / LLM API] direct HTTP, thinking OFF, ~1.7s
+       │
+       ▼ response text (streamed per sentence)
+[ElevenLabs TTS] per sentence, ~0.4s
+       │
+       ▼ PCM audio
+[PipeWire] → Opus encode → WebRTC
+       │
+       ▼
+You hear the agent respond (~4s after you stop speaking)
 ```
 
-### STT priority
+### Voice tools
 
-1. **whisper.cpp** (local, primary) — 99 languages, auto-detect, zero API cost, ~500ms latency
-2. **OpenAI Realtime** (fallback) — used automatically if whisper.cpp fails to start
+The agent can use tools during voice calls. When a tool is needed, the agent speaks a brief filler phrase while the tool executes in the background.
 
-## Prerequisites
-
-- **Node.js** >= 20
-- **PipeWire** with two loopback virtual devices configured (see [PipeWire Setup](#pipewire-setup))
-- **pw-play** and **pw-record** available in PATH
-- **libopus-dev** installed (`sudo apt install libopus-dev`)
-- **whisper.cpp** built with a model downloaded (see [Whisper Setup](#whisper-setup))
-- **ElevenLabs API key** and voice ID for TTS
-- A **Matrix homeserver** (e.g. Dendrite, Synapse) with TURN server configured
-- (Optional) **OpenAI API key** for fallback STT
+| Tool | Trigger example | Filler phrase |
+|---|---|---|
+| `get_current_time` | "What time is it?" | "Let me check the time." |
+| `check_server_status` | "Is the DGX running?" | "Checking the server now." |
+| `run_command` | "How much disk space is left?" | "Running that command now." |
+| `web_search` | "What's the weather?" | "Let me search for that." |
+| `send_message` | "Post that in the chat" | "Sending that message now." |
 
 ## Quick Start
 
+### 1. Install system dependencies
+
 ```bash
-# 1. Clone and install
-git clone https://github.com/AEON-7/matrix-voip-agent.git
-cd matrix-voip-agent
-npm install
-
-# 2. Configure
-cp .env.example .env
-# Edit .env — set Matrix credentials, ElevenLabs keys, and authorized users
-
-# 3. Build and run
-npm run build
-npm start
+sudo apt install -y build-essential cmake git curl ffmpeg libopus-dev \
+  pipewire pipewire-pulse wireplumber pipewire-audio-client-libraries
 ```
 
-## Whisper Setup
-
-Build whisper.cpp and download a model:
+### 2. Build whisper.cpp
 
 ```bash
-# Clone and build
 git clone https://github.com/ggerganov/whisper.cpp.git ~/whisper.cpp
 cd ~/whisper.cpp
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
-
-# Download the small model (good multilingual balance, ~500MB)
-./models/download-ggml-model.sh small
-
-# Download Silero VAD model for voice activity detection
-curl -L -o models/silero-vad.onnx \
-  "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx"
+./models/download-ggml-model.sh base    # fast, good for voice
+# Or: ./models/download-ggml-model.sh small  # slower, more accurate
 ```
 
-The agent auto-starts whisper-server on port 8178 when a call connects. To test manually:
+### 3. Set up PipeWire virtual audio devices
+
+Create two loopback configs:
+
+**TTS loopback** (`~/.config/pipewire/pipewire.conf.d/voip-tts-sink.conf`):
+```
+context.modules = [
+    {
+        name = libpipewire-module-loopback
+        args = {
+            node.name = "openclaw_tts"
+            node.description = "VoIP Agent TTS"
+            capture.props = {
+                media.class = "Audio/Sink"
+                audio.position = [ FL FR ]
+            }
+            playback.props = {
+                media.class = "Audio/Source"
+                node.name = "openclaw_tts_mic"
+                node.description = "VoIP Agent TTS Microphone"
+                audio.position = [ MONO ]
+            }
+        }
+    }
+]
+```
+
+**STT loopback** (`~/.config/pipewire/pipewire.conf.d/voip-stt-source.conf`):
+```
+context.modules = [
+    {
+        name = libpipewire-module-loopback
+        args = {
+            node.name = "openclaw_stt_speaker"
+            node.description = "VoIP Agent STT Speaker"
+            capture.props = {
+                media.class = "Audio/Sink"
+                audio.position = [ FL FR ]
+            }
+            playback.props = {
+                media.class = "Audio/Source"
+                node.name = "openclaw_stt_capture"
+                node.description = "VoIP Agent STT Capture"
+                audio.position = [ MONO ]
+            }
+        }
+    }
+]
+```
+
+Then restart PipeWire:
+```bash
+systemctl --user restart pipewire.service pipewire-pulse.service
+pactl list sinks short | grep openclaw   # should show 2 sinks
+pactl list sources short | grep openclaw # should show 2 sources
+```
+
+### 4. Clone, install, configure
 
 ```bash
-~/whisper.cpp/build/bin/whisper-server \
-  -m ~/whisper.cpp/models/ggml-small.bin \
-  --language auto --vad --vad-model ~/whisper.cpp/models/silero-vad.onnx \
-  --host 127.0.0.1 --port 8178 --convert -t 4
+git clone https://github.com/AEON-7/matrix-voip-agent.git
+cd matrix-voip-agent
+npm install
+cp .env.example .env
 ```
 
-### Model options
+Edit `.env` and fill in:
+- `MATRIX_USER_ID` and `MATRIX_ACCESS_TOKEN` (see [Generate a Matrix Access Token](#generate-a-matrix-access-token))
+- `AUTHORIZED_USERS` (who can call the bot)
+- `VLLM_BASE_URL`, `VLLM_API_KEY`, `VLLM_MODEL` (your LLM endpoint)
+- `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`
 
-| Model | Size | Languages | Speed | Accuracy |
-|---|---|---|---|---|
-| `tiny` | 75 MB | 99 | Fastest | Basic |
-| `base` | 142 MB | 99 | Fast | Good |
-| `small` | 466 MB | 99 | Moderate | **Recommended** |
-| `medium` | 1.5 GB | 99 | Slower | Great |
-| `large-v3` | 3.1 GB | 99 | Slowest | Best |
+### 5. Build and run
 
-Download other models: `./models/download-ggml-model.sh <model_name>`
+```bash
+npm run build
+npm start
+```
+
+You should see:
+```
+[INFO] [main] Matrix VoIP Agent ready — waiting for calls
+[INFO] [main] API server listening on http://127.0.0.1:8179
+```
+
+### 6. Test
+
+Open Element, navigate to a DM with the bot, and tap the phone icon to call.
 
 ## Generate a Matrix Access Token
-
-The agent needs an access token for the bot's Matrix account:
 
 ```bash
 curl -s -X POST https://YOUR_HOMESERVER/_matrix/client/v3/login \
@@ -153,142 +248,134 @@ curl -s -X POST https://YOUR_HOMESERVER/_matrix/client/v3/login \
 
 Copy the `access_token` from the response into your `.env` file.
 
+## Whisper Setup
+
+### Model options
+
+| Model | Size | Speed (CPU) | Accuracy | Best for |
+|---|---|---|---|---|
+| `tiny` | 75 MB | ~0.3s | Basic | Testing only |
+| **`base`** | 142 MB | **~1.5s** | Good | **Voice calls (recommended)** |
+| `small` | 466 MB | ~4.5s | Better | Higher accuracy needed |
+| `medium` | 1.5 GB | ~10s | Great | Non-real-time transcription |
+| `large-v3` | 3.1 GB | ~20s | Best | Offline batch processing |
+
+Download models:
+```bash
+cd ~/whisper.cpp
+./models/download-ggml-model.sh base   # recommended for voice calls
+```
+
+The agent auto-starts whisper-server when a call connects. To test manually:
+```bash
+~/whisper.cpp/build/bin/whisper-server \
+  -m ~/whisper.cpp/models/ggml-base.bin \
+  --language auto --host 127.0.0.1 --port 8178 --convert -t 8
+```
+
 ## Configuration
 
 All configuration is via environment variables (loaded from `.env`):
 
-### Matrix
+### Matrix (call signaling)
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `MATRIX_HOMESERVER_URL` | No | `http://127.0.0.1:8008` | Matrix homeserver URL |
-| `MATRIX_USER_ID` | **Yes** | — | Bot's full Matrix user ID (e.g. `@bot:example.com`) |
-| `MATRIX_ACCESS_TOKEN` | **Yes** | — | Access token from the login step above |
-| `MATRIX_DEVICE_NAME` | No | `OpenClaw Voice` | Device name shown in Matrix sessions |
+| `MATRIX_USER_ID` | **Yes** | — | Bot's full Matrix user ID |
+| `MATRIX_ACCESS_TOKEN` | **Yes** | — | Access token for the bot account |
+| `MATRIX_DEVICE_NAME` | No | `OpenClaw Voice` | Device name in Matrix sessions |
 | `AUTHORIZED_USERS` | **Yes** | — | Comma-separated Matrix user IDs allowed to call |
 
-### PipeWire
+### LLM (direct inference)
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `VLLM_BASE_URL` | **Yes** | `http://192.168.1.116:8000/v1` | OpenAI-compatible API endpoint |
+| `VLLM_API_KEY` | **Yes** | — | API key for the LLM server |
+| `VLLM_MODEL` | **Yes** | — | Model name as served by the LLM server |
+| `VLLM_SYSTEM_PROMPT` | No | *(built-in)* | Custom system prompt for voice conversations |
+
+### Whisper.cpp (local STT)
 
 | Variable | Default | Description |
 |---|---|---|
-| `PIPEWIRE_STT_SINK` | `input.openclaw_stt_speaker` | Sink for incoming caller audio (WebRTC → PipeWire) |
-| `PIPEWIRE_TTS_SOURCE` | `openclaw_tts_mic` | Source for outgoing agent audio (PipeWire → WebRTC) |
-| `PIPEWIRE_STT_CAPTURE` | `openclaw_stt_capture` | Source for STT capture (PipeWire → whisper) |
-| `PIPEWIRE_TTS_SINK` | `input.openclaw_tts` | Sink for TTS playback (ElevenLabs → PipeWire) |
-
-### Whisper.cpp (local STT — primary)
-
-| Variable | Default | Description |
-|---|---|---|
-| `WHISPER_ENABLED` | `true` | Enable local whisper.cpp STT |
-| `WHISPER_LANGUAGE` | `auto` | Language code or `auto` for auto-detection (99 languages) |
-| `WHISPER_SERVER_URL` | `http://127.0.0.1:8178` | whisper-server HTTP endpoint |
-| `WHISPER_SERVER_PORT` | `8178` | Port for auto-started whisper-server |
-| `WHISPER_SERVER_BIN` | `~/whisper.cpp/build/bin/whisper-server` | Path to whisper-server binary |
-| `WHISPER_MODEL_PATH` | `~/whisper.cpp/models/ggml-small.bin` | Path to whisper GGML model |
-| `WHISPER_VAD_MODEL_PATH` | `~/whisper.cpp/models/silero-vad.onnx` | Path to Silero VAD model |
-| `WHISPER_AUTO_START` | `true` | Auto-start whisper-server on call connect |
-
-### OpenAI (fallback STT)
-
-| Variable | Default | Description |
-|---|---|---|
-| `OPENAI_API_KEY` | — | OpenAI API key (only needed if whisper fails) |
-| `OPENAI_STT_MODEL` | `gpt-4o-transcribe` | OpenAI Realtime transcription model |
+| `WHISPER_ENABLED` | `true` | Enable local whisper.cpp |
+| `WHISPER_LANGUAGE` | `auto` | Language code or `auto` for detection |
+| `WHISPER_MODEL_PATH` | `~/whisper.cpp/models/ggml-small.bin` | Path to GGML model file |
+| `WHISPER_SERVER_BIN` | `~/whisper.cpp/build/bin/whisper-server` | Path to server binary |
+| `WHISPER_SERVER_PORT` | `8178` | HTTP port for whisper-server |
+| `WHISPER_AUTO_START` | `true` | Auto-start server on call connect |
 
 ### ElevenLabs (TTS)
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `ELEVENLABS_API_KEY` | **Yes** | — | ElevenLabs API key |
-| `ELEVENLABS_VOICE_ID` | **Yes** | — | ElevenLabs voice ID |
-| `ELEVENLABS_MODEL` | No | `eleven_flash_v2_5` | TTS model (flash recommended for low latency) |
+| `ELEVENLABS_VOICE_ID` | **Yes** | — | Voice ID for TTS |
+| `ELEVENLABS_MODEL` | No | `eleven_flash_v2_5` | TTS model (flash = low latency) |
 
-### Call limits
+### OpenAI (fallback STT)
 
 | Variable | Default | Description |
 |---|---|---|
-| `MAX_CONCURRENT_CALLS` | `1` | Maximum simultaneous calls |
-| `CALL_TIMEOUT_MS` | `1800000` | Auto-hangup timeout in ms (default: 30 min) |
-| `CRYPTO_STORE_PATH` | `./crypto-store` | Path for Matrix E2EE key storage |
-| `LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, `error` |
+| `OPENAI_API_KEY` | — | Only needed if whisper fails to start |
+| `OPENAI_STT_MODEL` | `gpt-4o-mini-transcribe` | Realtime transcription model |
 
-## PipeWire Setup
+### Voice tools
 
-Two PipeWire loopback devices bridge audio between WebRTC and the voice pipeline.
+| Variable | Default | Description |
+|---|---|---|
+| `BRAVE_SEARCH_API_KEY` | — | Brave Search API key for `web_search` tool |
 
-### TTS loopback (agent voice → caller)
+### PipeWire
 
-Create `~/.config/pipewire/pipewire.conf.d/openclaw-tts-sink.conf`:
+| Variable | Default | Description |
+|---|---|---|
+| `PIPEWIRE_STT_SINK` | `input.openclaw_stt_speaker` | Sink for incoming caller audio |
+| `PIPEWIRE_TTS_SOURCE` | `openclaw_tts_mic` | Source for outgoing agent audio |
+| `PIPEWIRE_STT_CAPTURE` | `openclaw_stt_capture` | Source for whisper STT capture |
+| `PIPEWIRE_TTS_SINK` | `input.openclaw_tts` | Sink for ElevenLabs TTS output |
 
-```
-context.modules = [
-    {
-        name = libpipewire-module-loopback
-        args = {
-            node.name = "openclaw_tts"
-            node.description = "OpenClaw TTS"
-            capture.props = {
-                media.class = "Audio/Sink"
-                audio.position = [ FL FR ]
-            }
-            playback.props = {
-                media.class = "Audio/Source"
-                node.name = "openclaw_tts_mic"
-                node.description = "OpenClaw TTS Microphone"
-                audio.position = [ MONO ]
-            }
-        }
-    }
-]
-```
+### Call limits and API
 
-### STT loopback (caller voice → agent)
+| Variable | Default | Description |
+|---|---|---|
+| `MAX_CONCURRENT_CALLS` | `1` | Max simultaneous calls |
+| `CALL_TIMEOUT_MS` | `1800000` | Auto-hangup after 30 min |
+| `API_PORT` | `8179` | HTTP API port for outbound calls |
+| `API_TOKEN` | — | Bearer token for the HTTP API |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 
-Create `~/.config/pipewire/pipewire.conf.d/openclaw-stt-source.conf`:
+## Outbound Calls
 
-```
-context.modules = [
-    {
-        name = libpipewire-module-loopback
-        args = {
-            node.name = "openclaw_stt_speaker"
-            node.description = "OpenClaw STT Speaker"
-            capture.props = {
-                media.class = "Audio/Sink"
-                audio.position = [ FL FR ]
-            }
-            playback.props = {
-                media.class = "Audio/Source"
-                node.name = "openclaw_stt_capture"
-                node.description = "OpenClaw STT Capture"
-                audio.position = [ MONO ]
-            }
-        }
-    }
-]
-```
-
-After creating both files, restart PipeWire:
+The agent can initiate calls to Matrix users via the HTTP API:
 
 ```bash
-systemctl --user restart pipewire.service pipewire-pulse.service
+curl -X POST http://127.0.0.1:8179/call \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "roomId": "!your-room-id:homeserver",
+    "userId": "@target-user:homeserver",
+    "greeting": "Hey, just calling to check in. How are you?"
+  }'
 ```
 
-Verify the devices exist:
+The target user's Matrix client (Element) will ring. When they answer, the agent speaks the greeting and the voice conversation begins.
 
-```bash
-pactl list sinks short | grep openclaw
-pactl list sources short | grep openclaw
-```
+### API endpoints
+
+| Method | Path | Body | Description |
+|---|---|---|---|
+| `POST` | `/call` | `{roomId, userId, greeting?}` | Initiate outbound call |
+| `POST` | `/hangup` | `{callId}` | End an active call |
+| `GET` | `/status` | — | Get active call count |
 
 ## Run as a systemd Service
 
 ```bash
-# Copy the service file
 cp systemd/matrix-voip-agent.service ~/.config/systemd/user/
-
-# Enable and start
 systemctl --user daemon-reload
 systemctl --user enable --now matrix-voip-agent.service
 
@@ -299,30 +386,52 @@ systemctl --user status matrix-voip-agent.service
 journalctl --user -u matrix-voip-agent.service -f
 ```
 
-## How a Call Works
+## Call Transcripts
 
-1. A Matrix user taps **Call** on the bot's profile in Element
-2. Element sends an `m.call.invite` event with an SDP offer
-3. `matrix-voip-agent` checks if the caller is in `AUTHORIZED_USERS`
-4. If unauthorized → automatic "busy" rejection
-5. If authorized → creates a WebRTC peer connection using TURN credentials
-6. Sends `m.call.answer` with an SDP answer
-7. ICE candidates are exchanged, DTLS/SRTP is established
-8. Audio bridge starts: WebRTC ↔ PipeWire (Opus codec)
-9. Voice pipeline starts: whisper.cpp STT + ElevenLabs TTS
-10. Caller's speech → local transcription → Matrix message → agent responds → TTS → caller hears
-11. Either side can hang up, or the call auto-ends after `CALL_TIMEOUT_MS`
+All voice calls are automatically transcribed and saved on hangup:
+
+- **Markdown**: `~/matrix-voip-agent/transcripts/call-YYYY-MM-DD_HH-MM-SS.md`
+- **JSON**: `~/matrix-voip-agent/transcripts/call-YYYY-MM-DD_HH-MM-SS.json`
+
+Each transcript includes timestamps, speaker labels, and the full conversation.
 
 ## TURN Server
 
-The agent fetches TURN credentials from your Matrix homeserver's `/voip/turnServer` endpoint. Your homeserver must have a TURN server (e.g. coturn) configured for WebRTC NAT traversal.
+WebRTC requires a TURN server for calls that cross NAT boundaries. Your Matrix homeserver must have TURN configured (e.g., coturn).
 
+The agent fetches TURN credentials automatically from `/_matrix/client/v3/voip/turnServer`.
+
+**Important:** TURN URIs must point to the actual TURN server IP, not a domain behind Cloudflare (Cloudflare doesn't proxy UDP/TURN traffic).
+
+Test:
 ```bash
 curl -s http://127.0.0.1:8008/_matrix/client/v3/voip/turnServer \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" | python3 -m json.tool
 ```
 
-Expected: JSON with `username`, `password`, `uris`, and `ttl`.
+## How It Works
+
+### Inbound call (someone calls the agent)
+
+1. Caller taps **Call** in Element
+2. Element sends `m.call.invite` with SDP offer
+3. Agent checks `AUTHORIZED_USERS` → rejects unauthorized callers
+4. Creates WebRTC peer connection with TURN credentials
+5. Sends `m.call.answer` with SDP answer
+6. ICE candidates exchanged, DTLS/SRTP established
+7. Audio bridge starts: WebRTC ↔ PipeWire (Opus codec)
+8. Voice pipeline starts: whisper STT → LLM → TTS
+9. Conversation flows until hangup or timeout
+
+### Outbound call (agent calls someone)
+
+1. HTTP API receives `POST /call` with room ID and target user
+2. Agent creates SDP offer and sends `m.call.invite`
+3. Target user's Element client rings
+4. When answered, agent receives `m.call.answer`
+5. WebRTC connects, voice pipeline starts
+6. Agent speaks greeting via TTS
+7. Conversation flows until hangup or timeout
 
 ## License
 
