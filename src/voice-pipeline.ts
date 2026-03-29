@@ -6,6 +6,8 @@ import { WhisperLocalSTT } from "./stt/whisper-local.js";
 import { OpenAIRealtimeSTT } from "./stt/openai-realtime.js";
 import { ElevenLabsTTS } from "./tts/elevenlabs.js";
 import { VLLMClient, ChatMessage, VOICE_SYSTEM_PROMPT } from "./llm/vllm-client.js";
+import { VoiceTool } from "./tools/types.js";
+import { BUILT_IN_TOOLS } from "./tools/built-in.js";
 import { Config } from "./config.js";
 import { logger } from "./logger.js";
 
@@ -36,6 +38,7 @@ export class VoicePipeline {
   private speaking = false;
   private sttMode: "whisper" | "openai" = "whisper";
   private openaiPwRecord: childProcess.ChildProcess | null = null;
+  private tools: VoiceTool[] = BUILT_IN_TOOLS;
 
   // Conversation history for context
   private history: ChatMessage[] = [];
@@ -136,59 +139,168 @@ export class VoicePipeline {
   }
 
   /**
-   * Hot path: transcript arrives → LLM → TTS → speaker
-   * Target: < 12 seconds from end of speech to first audio
+   * Hot path: transcript arrives → LLM (with tools) → TTS → speaker
+   *
+   * Flow:
+   * 1. First call: non-streaming with tools enabled
+   * 2. If tool call → speak filler → execute tool → call LLM again with result
+   * 3. If text response → stream it sentence by sentence with TTS
+   * 4. Max 3 tool rounds to prevent infinite loops
    */
   private async handleTranscript(text: string): Promise<void> {
     if (!this.running) return;
     const t0 = Date.now();
     logger.info(TAG, `[${this.sttMode}] Albert said: "${text}"`);
 
-    // Log to transcript
     this.transcript.push({
       timestamp: new Date().toISOString(),
       speaker: "user",
       text,
     });
 
-    // Add to conversation history
     this.history.push({ role: "user", content: text });
 
     try {
-      // Stream LLM response sentence by sentence
-      let fullResponse = "";
+      // First, try non-streaming with tools to detect tool calls
+      const response = await this.llm.chat(this.history, this.tools);
 
-      for await (const sentence of this.llm.streamSentences(this.history, text)) {
-        if (!this.running) break;
-
-        fullResponse += (fullResponse ? " " : "") + sentence;
-        const tLLM = Date.now();
-        logger.info(TAG, `LLM sentence (${tLLM - t0}ms): "${sentence}"`);
-
-        // TTS this sentence immediately — don't wait for the full response
-        await this.speakSentence(sentence);
+      if (response.toolCalls.length > 0) {
+        // Tool call path — filler speech + execute + follow up
+        await this.handleToolCalls(response, t0);
+      } else if (response.content) {
+        // Direct text response — speak it
+        await this.speakAndLog(response.content, t0);
       }
 
-      // Add full response to history
-      if (fullResponse) {
-        this.history.push({ role: "assistant", content: fullResponse });
-        this.transcript.push({
-          timestamp: new Date().toISOString(),
-          speaker: "celina",
-          text: fullResponse,
-        });
-
-        const totalMs = Date.now() - t0;
-        logger.info(TAG, `Turn complete in ${totalMs}ms: "${fullResponse.substring(0, 80)}..."`);
-      }
-
-      // Keep history manageable (last 20 turns)
+      // Keep history manageable
       if (this.history.length > 40) {
         this.history = this.history.slice(-20);
       }
     } catch (err: any) {
       logger.error(TAG, `LLM/TTS error: ${err.message}`);
     }
+  }
+
+  /**
+   * Handle tool calls: filler speech → execute → LLM follow-up
+   */
+  private async handleToolCalls(
+    response: import("./llm/vllm-client.js").ChatResponse,
+    t0: number,
+    depth: number = 0
+  ): Promise<void> {
+    if (depth >= 3) {
+      logger.warn(TAG, "Max tool call depth reached");
+      await this.speakAndLog("I ran into a loop trying to process that. Let me just answer directly.", t0);
+      return;
+    }
+
+    // Add assistant message with tool calls to history
+    this.history.push({
+      role: "assistant",
+      content: response.content || "",
+      tool_calls: response.toolCalls.map((tc, i) => ({
+        id: `call_${Date.now()}_${i}`,
+        type: "function",
+        function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
+      })),
+    });
+
+    for (let i = 0; i < response.toolCalls.length; i++) {
+      const tc = response.toolCalls[i];
+      const tool = this.tools.find(t => t.name === tc.name);
+
+      if (!tool) {
+        logger.warn(TAG, `Unknown tool: ${tc.name}`);
+        this.history.push({
+          role: "tool",
+          content: `Error: unknown tool "${tc.name}"`,
+          tool_call_id: `call_${Date.now()}_${i}`,
+        });
+        continue;
+      }
+
+      // Speak filler phrase while tool executes
+      logger.info(TAG, `Tool call: ${tc.name}(${JSON.stringify(tc.arguments)}) — filler: "${tool.fillerPhrase}"`);
+      const fillerPromise = this.speakSentence(tool.fillerPhrase);
+
+      // Execute tool in parallel with filler speech
+      const tTool = Date.now();
+      let result: string;
+      try {
+        result = await tool.execute(tc.arguments);
+
+        // Special handling for send_message tool
+        if (result.startsWith("__SEND_MATRIX__:")) {
+          const msg = result.slice("__SEND_MATRIX__:".length);
+          try {
+            await this.client.sendMessage(this.roomId, { msgtype: "m.text", body: msg } as any);
+            result = `Message sent to chat: "${msg}"`;
+          } catch (err: any) {
+            result = `Failed to send message: ${err.message}`;
+          }
+        }
+      } catch (err: any) {
+        result = `Tool error: ${err.message}`;
+      }
+
+      logger.info(TAG, `Tool ${tc.name} completed in ${Date.now() - tTool}ms: "${result.substring(0, 100)}"`);
+
+      // Wait for filler to finish before speaking result
+      await fillerPromise;
+
+      this.history.push({
+        role: "tool",
+        content: result,
+        tool_call_id: `call_${Date.now()}_${i}`,
+      });
+    }
+
+    // Call LLM again with tool results
+    const followUp = await this.llm.chat(this.history, this.tools);
+
+    if (followUp.toolCalls.length > 0) {
+      await this.handleToolCalls(followUp, t0, depth + 1);
+    } else if (followUp.content) {
+      await this.speakAndLog(followUp.content, t0);
+    }
+  }
+
+  /**
+   * Speak text and log to transcript
+   */
+  private async speakAndLog(text: string, t0: number): Promise<void> {
+    // Strip markdown for TTS
+    const clean = text
+      .replace(/\*\*(.+?)\*\*/g, "$1")
+      .replace(/\*(.+?)\*/g, "$1")
+      .replace(/`(.+?)`/g, "$1")
+      .replace(/```[\s\S]*?```/g, "")
+      .replace(/#{1,6}\s/g, "")
+      .replace(/\[(.+?)\]\(.+?\)/g, "$1")
+      .trim();
+
+    if (!clean) return;
+
+    this.history.push({ role: "assistant", content: text });
+    this.transcript.push({
+      timestamp: new Date().toISOString(),
+      speaker: "celina",
+      text,
+    });
+
+    // Split into sentences and speak each
+    const sentences = clean.match(/[^.!?]+[.!?]+/g) || [clean];
+    for (const sentence of sentences) {
+      if (!this.running) break;
+      const trimmed = sentence.trim();
+      if (trimmed.length > 5) {
+        await this.speakSentence(trimmed);
+      }
+    }
+
+    const totalMs = Date.now() - t0;
+    logger.info(TAG, `Turn complete in ${totalMs}ms: "${text.substring(0, 80)}..."`);
   }
 
   private async speakSentence(text: string): Promise<void> {
