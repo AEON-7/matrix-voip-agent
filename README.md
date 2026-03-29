@@ -18,7 +18,11 @@ cd matrix-voip-agent
 bash setup.sh
 ```
 
-The setup script installs all voice agent dependencies (whisper.cpp, PipeWire, Node.js) and walks you through connecting to your existing Matrix server. **[Jump to Path A details](#path-a-add-voice-agent-to-existing-matrix-server)**
+The setup script installs all voice agent dependencies (whisper.cpp, PipeWire, Node.js) and walks you through connecting to your existing Matrix server.
+
+After install completes, point your AI agent to **[AGENT.md](AGENT.md)** — it contains everything the agent needs to start making and receiving voice calls, using tools, and reading transcripts.
+
+**[Jump to Path A details](#path-a-add-voice-agent-to-existing-matrix-server)**
 
 ### Path B: I want the full turnkey setup
 
@@ -31,7 +35,11 @@ bash setup-homeserver.sh
 bash setup.sh
 ```
 
-Two scripts, fully automated. When they finish, you have a production Matrix server with an AI agent you can call. **[Jump to Path B details](#path-b-turnkey-matrix-server--voice-agent)**
+Two scripts, fully automated. When they finish, you have a production Matrix server with an AI agent you can call.
+
+After install completes, point your AI agent to **[AGENT.md](AGENT.md)** — it has the full API reference, tool catalog, and integration patterns so the agent can begin using its new voice calling and messaging capabilities immediately.
+
+**[Jump to Path B details](#path-b-turnkey-matrix-server--voice-agent)**
 
 ---
 
