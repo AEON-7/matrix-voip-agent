@@ -1,9 +1,11 @@
 import sdk from "matrix-js-sdk";
 import childProcess from "child_process";
-import { EventEmitter } from "events";
+import { writeFileSync, mkdirSync } from "fs";
+import { join } from "path";
 import { WhisperLocalSTT } from "./stt/whisper-local.js";
 import { OpenAIRealtimeSTT } from "./stt/openai-realtime.js";
 import { ElevenLabsTTS } from "./tts/elevenlabs.js";
+import { VLLMClient, ChatMessage, VOICE_SYSTEM_PROMPT } from "./llm/vllm-client.js";
 import { Config } from "./config.js";
 import { logger } from "./logger.js";
 
@@ -11,21 +13,34 @@ const TAG = "voice-pipeline";
 
 type STTBackend = WhisperLocalSTT | OpenAIRealtimeSTT;
 
+interface TranscriptEntry {
+  timestamp: string;
+  speaker: "user" | "celina";
+  text: string;
+}
+
 /**
- * Full voice pipeline for a Matrix VoIP call:
+ * Direct voice pipeline — minimum latency path:
  *
- * Albert speaks → PipeWire → Whisper (local, primary) or OpenAI (fallback) → transcript
- *   → Matrix message → Celina responds → ElevenLabs TTS → PipeWire → Albert hears
+ * Albert speaks → Whisper STT → transcript
+ *   → vLLM (direct HTTP, streamed) → sentence chunks
+ *   → ElevenLabs TTS (per sentence) → PipeWire → Albert hears Celina
+ *
+ * No Matrix in the loop during the call. Transcript saved to file after hangup.
  */
 export class VoicePipeline {
   private stt: STTBackend | null = null;
   private tts: ElevenLabsTTS;
+  private llm: VLLMClient;
   private running = false;
   private speaking = false;
   private sttMode: "whisper" | "openai" = "whisper";
-  private timelineHandler: ((event: sdk.MatrixEvent, room: sdk.Room | undefined, ...args: any[]) => void) | null = null;
+  private openaiPwRecord: childProcess.ChildProcess | null = null;
 
-  private bridgeClient: sdk.MatrixClient | null = null;
+  // Conversation history for context
+  private history: ChatMessage[] = [];
+  private transcript: TranscriptEntry[] = [];
+  private callStartTime: string;
 
   constructor(
     private config: Config,
@@ -38,59 +53,32 @@ export class VoicePipeline {
       config.elevenlabs.voiceId,
       config.elevenlabs.model
     );
-  }
 
-  private async getBridgeClient(): Promise<sdk.MatrixClient> {
-    if (this.bridgeClient) return this.bridgeClient;
+    this.llm = new VLLMClient(
+      config.vllm.baseUrl,
+      config.vllm.apiKey,
+      config.vllm.model,
+      config.vllm.systemPrompt || VOICE_SYSTEM_PROMPT
+    );
 
-    if (!this.config.bridge.accessToken) {
-      // No bridge account configured — fall back to main client
-      logger.warn(TAG, "No BRIDGE_ACCESS_TOKEN — transcripts will be sent as Celina");
-      return this.client;
-    }
-
-    const bridgeClient = sdk.createClient({
-      baseUrl: this.config.matrix.homeserverUrl,
-      accessToken: this.config.bridge.accessToken,
-      userId: this.config.bridge.userId,
-    });
-
-    // Join the room if not already joined
-    try {
-      await bridgeClient.joinRoom(this.roomId);
-      logger.info(TAG, `Bridge account joined room ${this.roomId}`);
-    } catch {
-      // Already joined or invite needed
-    }
-
-    this.bridgeClient = bridgeClient;
-    return bridgeClient;
+    this.callStartTime = new Date().toISOString();
   }
 
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
 
-    // 1. Start STT — prefer local whisper, fall back to OpenAI
+    // Start STT — prefer local whisper, fall back to OpenAI
     await this.startSTT();
 
-    // 2. Wire transcript events
+    // Wire transcript events — this is the hot path
     this.stt!.on("transcript", (text: string) => this.handleTranscript(text));
     this.stt!.on("speech_started", () => logger.debug(TAG, "Caller started speaking"));
 
-    // 3. Listen for Celina's responses in the room
-    this.timelineHandler = (event: sdk.MatrixEvent, room: sdk.Room | undefined) => {
-      if (room?.roomId === this.roomId) {
-        this.handleRoomEvent(event);
-      }
-    };
-    this.client.on(sdk.RoomEvent.Timeline, this.timelineHandler);
-
-    logger.info(TAG, `Voice pipeline started (STT: ${this.sttMode})`);
+    logger.info(TAG, `Voice pipeline started (STT: ${this.sttMode}, LLM: direct vLLM)`);
   }
 
   private async startSTT(): Promise<void> {
-    // Try local whisper first
     if (this.config.whisper.enabled) {
       try {
         const whisper = new WhisperLocalSTT(
@@ -113,124 +101,113 @@ export class VoicePipeline {
       }
     }
 
-    // Fallback to OpenAI Realtime
     if (this.config.openai.apiKey) {
       const openai = new OpenAIRealtimeSTT(
         this.config.openai.apiKey,
         this.config.openai.sttModel
       );
       await openai.connect();
-
-      // OpenAI Realtime needs us to pipe audio to it
       this.startOpenAICapture(openai);
-
       this.stt = openai;
       this.sttMode = "openai";
       logger.info(TAG, "Using OpenAI Realtime for STT (fallback)");
       return;
     }
 
-    throw new Error("No STT backend available — set WHISPER_ENABLED=true or provide OPENAI_API_KEY");
+    throw new Error("No STT backend available");
   }
-
-  private openaiPwRecord: import("child_process").ChildProcess | null = null;
 
   private startOpenAICapture(stt: OpenAIRealtimeSTT): void {
     const { spawn } = childProcess;
     this.openaiPwRecord = spawn("pw-record", [
       `--target=${this.config.pipewire.sttCapture}`,
-      "--format=s16",
-      "--rate=24000",
-      "--channels=1",
-      "--latency=20ms",
-      "-",
-    ], {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+      "--format=s16", "--rate=24000", "--channels=1", "--latency=20ms", "-",
+    ], { stdio: ["ignore", "pipe", "pipe"] });
 
     this.openaiPwRecord!.stdout?.on("data", (chunk: Buffer) => {
-      if (!this.running || !stt.isConnected) return;
-      stt.sendAudio(chunk);
+      if (this.running && stt.isConnected) stt.sendAudio(chunk);
     });
 
     this.openaiPwRecord!.on("exit", (code: number) => {
-      logger.info(TAG, `OpenAI pw-record exited with code ${code}`);
       if (this.running && this.sttMode === "openai") {
         setTimeout(() => this.startOpenAICapture(stt), 1000);
       }
     });
   }
 
+  /**
+   * Hot path: transcript arrives → LLM → TTS → speaker
+   * Target: < 12 seconds from end of speech to first audio
+   */
   private async handleTranscript(text: string): Promise<void> {
     if (!this.running) return;
+    const t0 = Date.now();
     logger.info(TAG, `[${this.sttMode}] Albert said: "${text}"`);
 
+    // Log to transcript
+    this.transcript.push({
+      timestamp: new Date().toISOString(),
+      speaker: "user",
+      text,
+    });
+
+    // Add to conversation history
+    this.history.push({ role: "user", content: text });
+
     try {
-      // Send transcript to OpenClaw agent via gateway CLI (async — must not block event loop)
-      const escaped = text.replace(/'/g, "'\\''");
-      const proc = childProcess.spawn("openclaw", [
-        "agent", "-m", text,
-        "--channel", "matrix",
-        "--to", this.callerUserId,
-        "--deliver",
-        "--timeout", "120",
-      ], {
-        stdio: ["ignore", "pipe", "pipe"],
-        timeout: 130000,
-      });
+      // Stream LLM response sentence by sentence
+      let fullResponse = "";
 
-      proc.stdout?.on("data", (d: Buffer) => {
-        logger.debug(TAG, `openclaw agent stdout: ${d.toString().trim()}`);
-      });
-      proc.stderr?.on("data", (d: Buffer) => {
-        logger.debug(TAG, `openclaw agent stderr: ${d.toString().trim()}`);
-      });
-      proc.on("exit", (code) => {
-        if (code === 0) {
-          logger.info(TAG, "OpenClaw agent delivered response");
-        } else {
-          logger.warn(TAG, `openclaw agent exited with code ${code}`);
-        }
-      });
+      for await (const sentence of this.llm.streamSentences(this.history, text)) {
+        if (!this.running) break;
 
-      logger.info(TAG, "Sent voice transcript to OpenClaw agent (async)");
+        fullResponse += (fullResponse ? " " : "") + sentence;
+        const tLLM = Date.now();
+        logger.info(TAG, `LLM sentence (${tLLM - t0}ms): "${sentence}"`);
+
+        // TTS this sentence immediately — don't wait for the full response
+        await this.speakSentence(sentence);
+      }
+
+      // Add full response to history
+      if (fullResponse) {
+        this.history.push({ role: "assistant", content: fullResponse });
+        this.transcript.push({
+          timestamp: new Date().toISOString(),
+          speaker: "celina",
+          text: fullResponse,
+        });
+
+        const totalMs = Date.now() - t0;
+        logger.info(TAG, `Turn complete in ${totalMs}ms: "${fullResponse.substring(0, 80)}..."`);
+      }
+
+      // Keep history manageable (last 20 turns)
+      if (this.history.length > 40) {
+        this.history = this.history.slice(-20);
+      }
     } catch (err: any) {
-      logger.error(TAG, `Failed to send transcript to agent: ${err.message}`);
+      logger.error(TAG, `LLM/TTS error: ${err.message}`);
     }
   }
 
-  private handleRoomEvent(event: sdk.MatrixEvent): void {
+  private async speakSentence(text: string): Promise<void> {
     if (!this.running) return;
 
-    const sender = event.getSender();
-    const type = event.getType();
+    // Wait if already speaking
+    const waitStart = Date.now();
+    while (this.speaking && this.running && Date.now() - waitStart < 30000) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+    if (!this.running) return;
 
-    // Only process text messages from the bot (Celina)
-    if (sender !== this.config.matrix.userId) return;
-    if (type !== "m.room.message") return;
-
-    const content = event.getContent();
-    if (content.msgtype !== "m.text") return;
-    if ((content as any)["io.openclaw.voice_transcript"]) return;
-
-    const responseText = content.body;
-    if (!responseText?.trim()) return;
-
-    logger.info(TAG, `Celina responded: "${responseText.substring(0, 80)}..."`);
-    this.speakResponse(responseText);
-  }
-
-  private async speakResponse(text: string): Promise<void> {
-    if (!this.running || this.speaking) return;
     this.speaking = true;
-
     try {
-      const pcm = await this.tts.synthesize(text, 48000);
+      const pcm = await this.tts.synthesize(text);
       if (!this.running) return;
       await this.playToTTS(pcm);
-      logger.info(TAG, "Finished speaking response");
     } catch (err: any) {
-      logger.error(TAG, `TTS error: ${err.message}`);
+      logger.error(TAG, `TTS error for sentence: ${err.message}`);
     } finally {
       this.speaking = false;
     }
@@ -242,12 +219,10 @@ export class VoicePipeline {
       const proc = spawn("pw-play", [
         `--target=${this.config.pipewire.ttsSink}`,
         "--format=s16",
-        "--rate=48000",
+        `--rate=${this.tts.outputSampleRate}`,
         "--channels=1",
         "-",
-      ], {
-        stdio: ["pipe", "ignore", "pipe"],
-      });
+      ], { stdio: ["pipe", "ignore", "pipe"] });
 
       proc.stderr?.on("data", (data: Buffer) => {
         const msg = data.toString().trim();
@@ -267,9 +242,56 @@ export class VoicePipeline {
     });
   }
 
+  /**
+   * Save call transcript and audio log after hangup.
+   */
+  saveTranscript(): void {
+    if (this.transcript.length === 0) return;
+
+    try {
+      const dir = join(process.env.HOME || "/tmp", "matrix-voip-agent", "transcripts");
+      mkdirSync(dir, { recursive: true });
+
+      const timestamp = this.callStartTime.replace(/[:.]/g, "-").replace("T", "_").slice(0, 19);
+      const filename = `call-${timestamp}.md`;
+      const filepath = join(dir, filename);
+
+      let md = `# Voice Call Transcript\n\n`;
+      md += `- **Date**: ${this.callStartTime}\n`;
+      md += `- **Caller**: ${this.callerUserId}\n`;
+      md += `- **Duration**: ${this.transcript.length} turns\n`;
+      md += `- **STT**: ${this.sttMode}\n\n`;
+      md += `---\n\n`;
+
+      for (const entry of this.transcript) {
+        const time = entry.timestamp.slice(11, 19);
+        const speaker = entry.speaker === "user" ? "**Albert**" : "**Celina**";
+        md += `[${time}] ${speaker}: ${entry.text}\n\n`;
+      }
+
+      writeFileSync(filepath, md);
+      logger.info(TAG, `Transcript saved to ${filepath}`);
+
+      // Also save as JSON for programmatic access
+      const jsonPath = join(dir, `call-${timestamp}.json`);
+      writeFileSync(jsonPath, JSON.stringify({
+        callStart: this.callStartTime,
+        caller: this.callerUserId,
+        sttMode: this.sttMode,
+        transcript: this.transcript,
+      }, null, 2));
+      logger.info(TAG, `JSON transcript saved to ${jsonPath}`);
+    } catch (err: any) {
+      logger.error(TAG, `Failed to save transcript: ${err.message}`);
+    }
+  }
+
   stop(): void {
     if (!this.running) return;
     this.running = false;
+
+    // Save transcript before cleanup
+    this.saveTranscript();
 
     // Stop STT
     if (this.stt) {
@@ -281,16 +303,9 @@ export class VoicePipeline {
       this.stt = null;
     }
 
-    // Stop OpenAI pw-record if active
     if (this.openaiPwRecord) {
       try { this.openaiPwRecord.kill("SIGTERM"); } catch {}
       this.openaiPwRecord = null;
-    }
-
-    // Remove Matrix listener
-    if (this.timelineHandler) {
-      this.client.removeListener(sdk.RoomEvent.Timeline, this.timelineHandler as any);
-      this.timelineHandler = null;
     }
 
     logger.info(TAG, "Voice pipeline stopped");
