@@ -77,7 +77,7 @@ export class WhisperLocalSTT extends EventEmitter {
       "--tmp-dir", "/tmp",
       "-t", "8",
       "-sns",
-      "--prompt", "Celina, OpenClaw, Albert, Matrix, PipeWire, DGX Spark, vLLM",
+      "--prompt", "Celina",
     ];
 
     // Note: VAD is handled by our own silence detection in processAudio(),
@@ -242,7 +242,13 @@ export class WhisperLocalSTT extends EventEmitter {
     logger.info(TAG, `Flushing ${durationMs.toFixed(0)}ms of audio (${pcm.length} bytes) to whisper-server`);
 
     try {
-      const transcript = await this.transcribe(pcm);
+      let transcript = await this.transcribe(pcm);
+      // Fix common proper noun misspellings
+      transcript = transcript
+        .replace(/\bSelena\b/gi, "Celina")
+        .replace(/\bSelina\b/gi, "Celina")
+        .replace(/\bSalina\b/gi, "Celina")
+        .replace(/\bCelena\b/gi, "Celina");
       logger.info(TAG, `Whisper returned: "${transcript}"`);
       if (transcript && transcript.trim()) {
         this.emit("transcript", transcript.trim());
@@ -270,7 +276,7 @@ export class WhisperLocalSTT extends EventEmitter {
       try { writeFileSync(debugPath, wav); } catch {}
 
       const result = execSync(
-        `curl -s -X POST ${this.serverUrl}/inference -F "file=@${tmpPath}" -F "response_format=json" 2>&1`,
+        `curl -s -X POST ${this.serverUrl}/inference -F "file=@${tmpPath}" -F "response_format=json" -F "prompt=Celina" 2>&1`,
         { timeout: 30000 }
       ).toString();
 

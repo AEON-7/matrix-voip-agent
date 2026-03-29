@@ -34,6 +34,9 @@ export function registerCallHandlers(
         logger.info(TAG, `Received m.call.invite from ${sender} (age=${event.getLocalAge()}ms)`);
         handleInvite(client, config, callManager, event, room.roomId);
         break;
+      case "m.call.answer":
+        handleRemoteAnswer(callManager, event);
+        break;
       case "m.call.candidates":
         handleCandidates(callManager, event);
         break;
@@ -106,6 +109,20 @@ function handleInvite(
   callManager.handleInvite(client, invite);
 }
 
+function handleRemoteAnswer(callManager: CallManager, event: sdk.MatrixEvent): void {
+  const content = event.getContent();
+  const callId = content.call_id;
+  const answerSdp = content.answer?.sdp;
+
+  if (!answerSdp) {
+    logger.warn(TAG, `Received m.call.answer without SDP for ${callId}`);
+    return;
+  }
+
+  logger.info(TAG, `Received call answer for ${callId}`);
+  callManager.handleRemoteAnswer(callId, answerSdp);
+}
+
 function handleCandidates(
   callManager: CallManager,
   event: sdk.MatrixEvent
@@ -143,6 +160,28 @@ function handleSelectAnswer(
     logger.info(TAG, `Another device was selected for call ${callId}, hanging up`);
     callManager.handleRemoteHangup(callId);
   }
+}
+
+export async function sendInvite(
+  client: sdk.MatrixClient,
+  roomId: string,
+  callId: string,
+  partyId: string,
+  offerSdp: string,
+  lifetime: number = 60000
+): Promise<void> {
+  await client.sendEvent(roomId, "m.call.invite" as any, {
+    call_id: callId,
+    party_id: partyId,
+    version: "1",
+    lifetime,
+    offer: { type: "offer", sdp: offerSdp },
+    capabilities: {
+      "m.call.transferee": false,
+      "m.call.dtmf": false,
+    },
+  });
+  logger.info(TAG, `Sent call invite for ${callId} to room ${roomId}`);
 }
 
 export async function sendAnswer(

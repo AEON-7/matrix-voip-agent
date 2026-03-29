@@ -1,7 +1,7 @@
 import sdk from "matrix-js-sdk";
 import { Config } from "./config.js";
 import { CallSession, IceServer } from "./webrtc/call-session.js";
-import { CallInvite, sendAnswer, sendCandidates, sendHangup } from "./matrix/call-signaling.js";
+import { CallInvite, sendAnswer, sendInvite, sendCandidates, sendHangup } from "./matrix/call-signaling.js";
 import { fetchTurnCredentials, turnToIceServers } from "./matrix/turn.js";
 import { VoicePipeline } from "./voice-pipeline.js";
 import { logger } from "./logger.js";
@@ -175,6 +175,134 @@ export class CallManager {
       session.addRemoteCandidate(c).catch((err) => {
         logger.warn(TAG, `Failed to add ICE candidate for ${callId}`, err);
       });
+    }
+  }
+
+  /**
+   * Initiate an outbound call to a user in a room.
+   * Celina calls Albert.
+   */
+  async initiateCall(
+    client: sdk.MatrixClient,
+    roomId: string,
+    targetUserId: string,
+    greeting?: string
+  ): Promise<string> {
+    if (this.activeCalls.size >= this.config.calls.maxConcurrent) {
+      throw new Error("Max concurrent calls reached");
+    }
+
+    const callId = `outbound-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    const session = new CallSession(
+      callId,
+      roomId,
+      targetUserId,
+      "voip-agent",
+      this.iceServers,
+      this.config.pipewire.sttSink,
+      this.config.pipewire.ttsSource,
+      this.config.calls.timeoutMs
+    );
+
+    // Batch local ICE candidates
+    let candidateBatch: Array<{ candidate: string; sdpMLineIndex: number; sdpMid: string }> = [];
+    let batchTimer: ReturnType<typeof setTimeout> | null = null;
+
+    session.onLocalCandidate = (candidate) => {
+      candidateBatch.push(candidate);
+      if (!batchTimer) {
+        batchTimer = setTimeout(async () => {
+          const batch = candidateBatch;
+          candidateBatch = [];
+          batchTimer = null;
+          try {
+            await sendCandidates(client, roomId, callId, this.config.matrix.deviceName, batch);
+          } catch (err) {
+            logger.error(TAG, "Failed to send ICE candidates", err);
+          }
+        }, 2000);
+      }
+    };
+
+    session.onHangup = async (cid) => {
+      const pipeline = this.voicePipelines.get(cid);
+      if (pipeline) {
+        pipeline.stop();
+        this.voicePipelines.delete(cid);
+      }
+      this.activeCalls.delete(cid);
+      if (batchTimer) clearTimeout(batchTimer);
+      try {
+        await sendHangup(client, roomId, cid);
+      } catch {}
+      logger.info(TAG, `Outbound call ${cid} removed. Active calls: ${this.activeCalls.size}`);
+    };
+
+    this.activeCalls.set(callId, session);
+    logger.info(TAG, `Initiating outbound call ${callId} to ${targetUserId} in ${roomId}`);
+
+    try {
+      const offerSdp = await session.initiate();
+      await sendInvite(client, roomId, callId, this.config.matrix.deviceName, offerSdp);
+      logger.info(TAG, `Outbound call ${callId} invite sent, waiting for answer...`);
+
+      // Start voice pipeline with greeting
+      if (this.voicePipelineEnabled && greeting) {
+        try {
+          const pipeline = new VoicePipeline(this.config, client, roomId, targetUserId);
+          await pipeline.start();
+          this.voicePipelines.set(callId, pipeline);
+          // Speak the greeting once connected
+          this.pendingGreetings.set(callId, greeting);
+          logger.info(TAG, `Voice pipeline ready for ${callId}, greeting queued`);
+        } catch (err: any) {
+          logger.error(TAG, `Failed to start voice pipeline: ${err.message}`);
+        }
+      }
+
+      return callId;
+    } catch (err: any) {
+      logger.error(TAG, `Failed to initiate call ${callId}: ${err.message}`);
+      this.activeCalls.delete(callId);
+      session.hangup();
+      throw err;
+    }
+  }
+
+  private pendingGreetings = new Map<string, string>();
+
+  /**
+   * Handle answer to our outbound call.
+   */
+  async handleRemoteAnswer(callId: string, answerSdp: string): Promise<void> {
+    const session = this.activeCalls.get(callId);
+    if (!session) {
+      logger.debug(TAG, `Answer for unknown call ${callId}`);
+      return;
+    }
+
+    try {
+      await session.handleAnswer(answerSdp);
+      logger.info(TAG, `Outbound call ${callId} answered, connected!`);
+
+      // Speak greeting if queued
+      const greeting = this.pendingGreetings.get(callId);
+      if (greeting) {
+        this.pendingGreetings.delete(callId);
+        // Give a moment for audio bridge to stabilize
+        setTimeout(async () => {
+          const pipeline = this.voicePipelines.get(callId);
+          if (pipeline) {
+            logger.info(TAG, `Speaking greeting: "${greeting}"`);
+            (pipeline as any).speakSentence?.(greeting);
+          }
+        }, 1500);
+      }
+    } catch (err: any) {
+      logger.error(TAG, `Failed to handle answer for ${callId}: ${err.message}`);
+      session.hangup();
+      this.activeCalls.delete(callId);
     }
   }
 
