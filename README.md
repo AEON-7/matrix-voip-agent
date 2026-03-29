@@ -4,6 +4,42 @@ Headless Matrix WebRTC voice call agent. Auto-answers (and initiates) Matrix VoI
 
 Call your AI agent from any Matrix client. The agent hears you, thinks, and talks back — all in ~4 seconds.
 
+## How to Install and Configure
+
+**Three commands** to get up and running:
+
+```bash
+git clone https://github.com/AEON-7/matrix-voip-agent.git
+cd matrix-voip-agent
+bash setup.sh
+```
+
+The setup script installs **all dependencies automatically** — system packages, Node.js, PipeWire virtual audio devices, whisper.cpp speech recognition, and npm modules. It walks you through each step and tells you exactly what it's doing.
+
+When it finishes, edit the `.env` file with your credentials:
+
+```bash
+nano .env
+```
+
+You'll need to fill in:
+- **Matrix bot account** — user ID and access token (the script tells you how to generate one)
+- **LLM server** — URL and API key for any OpenAI-compatible endpoint (vLLM, Ollama, OpenAI, etc.)
+- **ElevenLabs** — API key and voice ID for text-to-speech
+- **Authorized users** — who's allowed to call the bot
+
+Then start:
+
+```bash
+npm start
+```
+
+Open Element (or any Matrix client), navigate to a DM with the bot, and tap the phone icon. You're live.
+
+> **Fully unattended install** (no prompts): `bash setup.sh --auto`
+
+---
+
 ## Requirements
 
 ### System
