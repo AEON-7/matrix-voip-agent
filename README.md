@@ -102,6 +102,7 @@ You should see `username`, `password`, `uris` (with TURN server addresses), and 
 - A Linux server (Ubuntu 22.04+ recommended) with a public IP or port forwarding on ports 443 and 3478
 - A domain name (purchased, or free via DuckDNS/FreeDNS)
 - An email address (for Let's Encrypt TLS certificates)
+- Port forwarding configured on your router — see the **[Firewall and Port Forwarding Guide](docs/firewall/)** for step-by-step instructions for your specific router
 
 ### What you get
 
@@ -176,17 +177,19 @@ The homeserver setup supports four options — pick the one that fits:
 
 All options get automatic TLS certificates from Let's Encrypt via Caddy. If you already own a domain with a static IP, option 1 is simplest — just point your A record and go.
 
-### Ports
+### Ports and Firewall
 
-The homeserver needs these ports open (the setup script configures `ufw` if available):
+The homeserver needs these ports forwarded from your router to the server (the setup script configures `ufw` on the server itself):
 
 | Port | Protocol | Service | Required? |
 |---|---|---|---|
 | 443 | TCP | HTTPS (Caddy) | Yes |
 | 8448 | TCP | Matrix federation | Yes for federation |
 | 3478 | TCP + UDP | TURN/STUN (coturn) | Yes for voice/video calls |
-| 5349 | TCP | TURNS (TLS) | Optional, for TURN over TLS |
+| 5349 | TCP | TURNS (TLS) | Recommended |
 | 49152-65535 | UDP | TURN relay range | Yes for voice/video calls |
+
+**Need help configuring your router?** See the **[Firewall and Port Forwarding Guide](docs/firewall/)** for step-by-step instructions for UniFi, pfSense, OPNsense, OpenWRT, Eero, Netgear, Linksys, TP-Link, Asus, Google Nest, Starlink, and more.
 
 ### Architecture (turnkey deployment)
 
