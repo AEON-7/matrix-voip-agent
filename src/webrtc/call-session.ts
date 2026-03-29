@@ -138,6 +138,86 @@ export class CallSession {
     return this.pc.localDescription!.sdp;
   }
 
+  /**
+   * Initiate an outbound call — create SDP offer (Celina calls Albert).
+   */
+  async initiate(): Promise<string> {
+    this.state = "answering";
+
+    this.pc = new RTCPeerConnection({
+      iceServers: this.iceServers.map((s) => ({
+        urls: s.urls,
+        username: s.username,
+        credential: s.credential,
+      })),
+      headerExtensions: {
+        audio: [useSdesMid(), useAbsSendTime()],
+      },
+    });
+
+    const transceiver = this.pc.addTransceiver("audio", {
+      direction: "sendrecv",
+    });
+
+    this.pc.onTrack.subscribe((mediaTrack: any) => {
+      const track = mediaTrack.track ?? mediaTrack;
+      logger.info(TAG, `Remote track received: ${track.kind ?? "audio"}`);
+      this.startAudioBridge(
+        track,
+        (pkt: RtpPacket) => transceiver.sender.sendRtp(pkt)
+      );
+    });
+
+    this.pc.onIceCandidate.subscribe((candidate) => {
+      if (candidate && this.onLocalCandidate) {
+        this.onLocalCandidate({
+          candidate: candidate.candidate,
+          sdpMLineIndex: candidate.sdpMLineIndex ?? 0,
+          sdpMid: candidate.sdpMid ?? "0",
+        });
+      }
+    });
+
+    this.pc.iceConnectionStateChange.subscribe((state) => {
+      logger.info(TAG, `ICE connection state: ${state}`);
+      if (state === "disconnected" || state === "failed") {
+        logger.warn(TAG, `ICE ${state}, hanging up`);
+        this.hangup();
+      }
+    });
+
+    // Create offer (not answer)
+    const offer = await this.pc.createOffer();
+    await this.pc.setLocalDescription(offer);
+
+    this.timeout = setTimeout(() => {
+      logger.warn(TAG, `Outbound call ${this.callId} timed out`);
+      this.hangup();
+    }, this.callTimeoutMs);
+
+    logger.info(TAG, `Outbound call ${this.callId} offer created`);
+    return this.pc.localDescription!.sdp;
+  }
+
+  /**
+   * Handle the remote answer to our outbound call offer.
+   */
+  async handleAnswer(answerSdp: string): Promise<void> {
+    if (!this.pc) throw new Error("No peer connection");
+
+    await this.pc.setRemoteDescription(
+      new RTCSessionDescription(answerSdp, "answer")
+    );
+
+    for (const candidate of this.pendingCandidates) {
+      await this.pc.addIceCandidate(candidate);
+    }
+    this.pendingCandidates = [];
+
+    this.state = "active";
+    logger.info(TAG, `Outbound call ${this.callId} connected`);
+  }
+
   async addRemoteCandidate(candidate: {
     candidate: string;
     sdpMLineIndex: number;

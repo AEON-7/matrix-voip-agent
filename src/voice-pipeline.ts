@@ -303,7 +303,7 @@ export class VoicePipeline {
     logger.info(TAG, `Turn complete in ${totalMs}ms: "${text.substring(0, 80)}..."`);
   }
 
-  private async speakSentence(text: string): Promise<void> {
+  async speakSentence(text: string): Promise<void> {
     if (!this.running) return;
 
     // Wait if already speaking
