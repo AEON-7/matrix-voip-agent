@@ -1,16 +1,23 @@
 import { logger } from "../logger.js";
+import { VoiceTool, toOpenAITools, ToolCall } from "../tools/types.js";
 
 const TAG = "vllm";
 
 export interface ChatMessage {
-  role: "system" | "user" | "assistant";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
+  tool_calls?: any[];
+  tool_call_id?: string;
+}
+
+export interface ChatResponse {
+  content: string;
+  toolCalls: ToolCall[];
 }
 
 /**
  * Direct vLLM client for low-latency voice conversations.
- * Calls the OpenAI-compatible chat completions API on the DGX Spark.
- * Supports streaming for first-sentence TTS while the LLM is still generating.
+ * Supports tool calling and sentence-level streaming.
  */
 export class VLLMClient {
   constructor(
@@ -21,15 +28,24 @@ export class VLLMClient {
   ) {}
 
   /**
-   * Send a message and get the full response.
-   * For lowest latency, use streamSentences() instead.
+   * Non-streaming chat — returns full response. Supports tool calls.
    */
-  async chat(history: ChatMessage[], userMessage: string): Promise<string> {
-    const messages: ChatMessage[] = [
-      { role: "system", content: this.systemPrompt },
-      ...history,
-      { role: "user", content: userMessage },
-    ];
+  async chat(
+    messages: ChatMessage[],
+    tools?: VoiceTool[]
+  ): Promise<ChatResponse> {
+    const body: any = {
+      model: this.model,
+      messages: [{ role: "system", content: this.systemPrompt }, ...messages],
+      max_tokens: 512,
+      temperature: 0.7,
+      chat_template_kwargs: { enable_thinking: false },
+    };
+
+    if (tools && tools.length > 0) {
+      body.tools = toOpenAITools(tools);
+      body.tool_choice = "auto";
+    }
 
     const resp = await fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
@@ -37,14 +53,7 @@ export class VLLMClient {
         "Content-Type": "application/json",
         Authorization: `Bearer ${this.apiKey}`,
       },
-      body: JSON.stringify({
-        model: this.model,
-        messages,
-        max_tokens: 512,
-        temperature: 0.7,
-        stream: false,
-        chat_template_kwargs: { enable_thinking: false },
-      }),
+      body: JSON.stringify(body),
     });
 
     if (!resp.ok) {
@@ -53,23 +62,39 @@ export class VLLMClient {
     }
 
     const json = (await resp.json()) as any;
-    const content = json.choices?.[0]?.message?.content || "";
-    logger.info(TAG, `Response (${content.length} chars): "${content.substring(0, 80)}..."`);
-    return content;
+    const choice = json.choices?.[0]?.message;
+    const content = choice?.content || "";
+    const rawToolCalls = choice?.tool_calls || [];
+
+    const toolCalls: ToolCall[] = rawToolCalls.map((tc: any) => ({
+      name: tc.function?.name || "",
+      arguments: (() => {
+        try { return JSON.parse(tc.function?.arguments || "{}"); }
+        catch { return {}; }
+      })(),
+    }));
+
+    if (toolCalls.length > 0) {
+      logger.info(TAG, `Tool calls: ${toolCalls.map(t => t.name).join(", ")}`);
+    }
+    if (content) {
+      logger.info(TAG, `Response (${content.length} chars): "${content.substring(0, 80)}..."`);
+    }
+
+    return { content, toolCalls };
   }
 
   /**
-   * Stream the response and yield complete sentences as they arrive.
-   * This allows TTS to start speaking the first sentence while the LLM
-   * is still generating the rest.
+   * Stream the response and yield complete sentences.
+   * Does NOT support tool calling — use chat() for tool-capable requests.
    */
   async *streamSentences(
-    history: ChatMessage[],
+    messages: ChatMessage[],
     userMessage: string
   ): AsyncGenerator<string> {
-    const messages: ChatMessage[] = [
+    const allMessages: ChatMessage[] = [
       { role: "system", content: this.systemPrompt },
-      ...history,
+      ...messages,
       { role: "user", content: userMessage },
     ];
 
@@ -81,7 +106,7 @@ export class VLLMClient {
       },
       body: JSON.stringify({
         model: this.model,
-        messages,
+        messages: allMessages,
         max_tokens: 512,
         temperature: 0.7,
         stream: true,
@@ -100,7 +125,6 @@ export class VLLMClient {
     const decoder = new TextDecoder();
     let buffer = "";
     let sentenceBuffer = "";
-    // Sentence-ending punctuation
     const sentenceEnd = /[.!?]\s*$/;
 
     try {
@@ -110,7 +134,6 @@ export class VLLMClient {
 
         buffer += decoder.decode(value, { stream: true });
 
-        // Parse SSE lines
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
 
@@ -127,7 +150,6 @@ export class VLLMClient {
 
             sentenceBuffer += token;
 
-            // Check if we have a complete sentence
             if (sentenceEnd.test(sentenceBuffer) && sentenceBuffer.trim().length > 10) {
               const sentence = sentenceBuffer.trim();
               sentenceBuffer = "";
@@ -139,7 +161,6 @@ export class VLLMClient {
         }
       }
 
-      // Yield any remaining text
       if (sentenceBuffer.trim()) {
         yield sentenceBuffer.trim();
       }
@@ -150,8 +171,7 @@ export class VLLMClient {
 }
 
 /**
- * Default system prompt for voice conversations.
- * Keeps responses short and conversational.
+ * Default system prompt for voice conversations with tool support.
  */
 export const VOICE_SYSTEM_PROMPT = `You are Celina, an AI assistant having a live voice conversation. Your responses will be spoken aloud via text-to-speech.
 
@@ -162,4 +182,6 @@ Rules for voice responses:
 - Never say "as an AI" or give disclaimers.
 - If asked a complex question, give a brief answer and offer to elaborate.
 - Match the energy of the caller — casual for casual, focused for focused.
-- You can hear the caller's voice through speech-to-text, so there may be minor transcription errors. Infer intent.`;
+- You can hear the caller's voice through speech-to-text, so there may be minor transcription errors. Infer intent.
+- You have tools available. Use them when the caller asks for real-time information, system checks, or actions.
+- When using a tool, do NOT say what you're about to do — just call the tool. The system will provide a filler phrase automatically while it runs.`;

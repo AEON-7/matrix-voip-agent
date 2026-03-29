@@ -29,7 +29,7 @@ export class WhisperLocalSTT extends EventEmitter {
 
   // Silence detection: RMS threshold on PCM samples
   private readonly silenceThresholdRms = 150;
-  private readonly silenceDurationMs = 800;
+  private readonly silenceDurationMs = 500;
   private readonly minSpeechMs = 500;
   private readonly maxBufferSeconds = 30;
 
@@ -75,8 +75,9 @@ export class WhisperLocalSTT extends EventEmitter {
       "--port", String(this.serverPort),
       "--convert",
       "--tmp-dir", "/tmp",
-      "-t", "4",
+      "-t", "8",
       "-sns",
+      "--prompt", "Celina, OpenClaw, Albert, Matrix, PipeWire, DGX Spark, vLLM",
     ];
 
     // Note: VAD is handled by our own silence detection in processAudio(),
