@@ -4,9 +4,13 @@ Headless Matrix WebRTC voice call agent. Auto-answers (and initiates) Matrix VoI
 
 Call your AI agent from any Matrix client. The agent hears you, thinks, and talks back — all in ~4 seconds.
 
-## How to Install and Configure
+---
 
-**Three commands** to get up and running:
+## Choose Your Installation Path
+
+### Path A: I already have a Matrix server
+
+You have a working Matrix homeserver (Dendrite, Synapse, Conduit) with a TURN server configured. You just want to add voice agent capabilities.
 
 ```bash
 git clone https://github.com/AEON-7/matrix-voip-agent.git
@@ -14,89 +18,195 @@ cd matrix-voip-agent
 bash setup.sh
 ```
 
-The setup script installs **all dependencies automatically** — system packages, Node.js, PipeWire virtual audio devices, whisper.cpp speech recognition, and npm modules. It walks you through each step and tells you exactly what it's doing.
+The setup script installs all voice agent dependencies (whisper.cpp, PipeWire, Node.js) and walks you through connecting to your existing Matrix server. **[Jump to Path A details](#path-a-add-voice-agent-to-existing-matrix-server)**
 
-When it finishes, edit the `.env` file with your credentials:
+### Path B: I want the full turnkey setup
+
+You don't have a Matrix server yet. This path sets up **everything from scratch** — a fully federated Matrix homeserver with encrypted messaging, TURN server for voice/video, automatic TLS certificates, dynamic DNS, and the AI voice agent — all on a single machine.
 
 ```bash
-nano .env
+git clone https://github.com/AEON-7/matrix-voip-agent.git
+cd matrix-voip-agent
+bash setup-homeserver.sh
+bash setup.sh
 ```
 
-You'll need to fill in:
-- **Matrix bot account** — user ID and access token (the script tells you how to generate one)
-- **LLM server** — URL and API key for any OpenAI-compatible endpoint (vLLM, Ollama, OpenAI, etc.)
-- **ElevenLabs** — API key and voice ID for text-to-speech
-- **Authorized users** — who's allowed to call the bot
+Two scripts, fully automated. When they finish, you have a production Matrix server with an AI agent you can call. **[Jump to Path B details](#path-b-turnkey-matrix-server--voice-agent)**
 
-Then start:
+---
+
+## Path A: Add Voice Agent to Existing Matrix Server
+
+### What you need
+
+- A running Matrix homeserver (Dendrite, Synapse, or Conduit) accessible at an HTTP URL
+- A TURN server (coturn) configured on the homeserver for WebRTC NAT traversal
+- A bot account on the homeserver with a password or access token
+- A Linux machine to run the voice agent (can be the same machine as the homeserver)
+
+### Install
+
+```bash
+git clone https://github.com/AEON-7/matrix-voip-agent.git
+cd matrix-voip-agent
+bash setup.sh
+```
+
+The setup script:
+1. Installs system packages (PipeWire, ffmpeg, cmake, libopus)
+2. Installs Node.js 22 if needed
+3. Creates PipeWire virtual audio devices for the voice pipeline
+4. Builds whisper.cpp and downloads the speech recognition model
+5. Installs Node.js dependencies and compiles TypeScript
+6. Walks you through entering your credentials:
+   - Matrix homeserver URL, bot user ID, access token
+   - LLM server URL, API key, and model name
+   - ElevenLabs API key and voice ID
+
+When it finishes, start the agent:
 
 ```bash
 npm start
 ```
 
-Open Element (or any Matrix client), navigate to a DM with the bot, and tap the phone icon. You're live.
+> **Fully unattended install** (no prompts, requires .env pre-configured): `bash setup.sh --auto`
 
-> **Fully unattended install** (no prompts): `bash setup.sh --auto`
+### TURN server requirement
+
+Your Matrix homeserver **must** have a TURN server configured. Without it, WebRTC calls will only work on the same LAN. The voice agent fetches TURN credentials automatically from the homeserver.
+
+**Important:** The TURN URI must point to the actual server IP, not a domain behind a CDN like Cloudflare (Cloudflare doesn't proxy UDP/TURN traffic).
+
+Verify your TURN setup:
+```bash
+curl -s http://YOUR_HOMESERVER/_matrix/client/v3/voip/turnServer \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" | python3 -m json.tool
+```
+
+You should see `username`, `password`, `uris` (with TURN server addresses), and `ttl`.
 
 ---
 
-## Requirements
+## Path B: Turnkey Matrix Server + Voice Agent
 
-### System
+### What you need
 
-| Requirement | Minimum | Recommended |
-|---|---|---|
-| **OS** | Linux (PipeWire required) | Ubuntu 24.04+ |
-| **Node.js** | 20+ | 22+ |
-| **CPU** | 4 cores (for whisper.cpp) | 8+ cores |
-| **RAM** | 2 GB (base model) | 4 GB (small model) |
-| **Disk** | 500 MB (base model + deps) | 2 GB (small model + deps) |
+- A Linux server (Ubuntu 22.04+ recommended) with a public IP or port forwarding on ports 443 and 3478
+- A domain name (purchased, or free via DuckDNS/FreeDNS)
+- An email address (for Let's Encrypt TLS certificates)
 
-### Services
+### What you get
 
-| Service | Purpose | Required? |
-|---|---|---|
-| **Matrix homeserver** | Call signaling (Dendrite, Synapse, Conduit) | Yes |
-| **TURN server** | WebRTC NAT traversal (coturn recommended) | Yes for remote calls |
-| **PipeWire** | Virtual audio routing between WebRTC and STT/TTS | Yes |
-| **LLM server** | AI responses — any OpenAI-compatible API (vLLM, Ollama, OpenAI, etc.) | Yes |
-| **ElevenLabs account** | Text-to-speech (free tier works, starter+ recommended) | Yes |
+After running two scripts, you'll have:
 
-### API Keys and Accounts
+| Component | What it does |
+|---|---|
+| **Dendrite** | Matrix homeserver — handles messaging, rooms, E2EE, federation |
+| **PostgreSQL** | Database for Dendrite |
+| **Caddy** | Reverse proxy with automatic HTTPS via Let's Encrypt |
+| **coturn** | TURN/STUN server for WebRTC NAT traversal |
+| **DynDNS updater** | Keeps your domain pointed at your IP (DuckDNS, No-IP, or custom) |
+| **matrix-voip-agent** | AI voice agent with STT, LLM, and TTS |
 
-| Account | What you need | Free tier? |
-|---|---|---|
-| **Matrix account** | Bot user account + access token on your homeserver | Self-hosted = free |
-| **LLM provider** | OpenAI-compatible endpoint + API key | Local vLLM/Ollama = free |
-| **ElevenLabs** | API key + voice ID | Yes (limited characters/month) |
-| **OpenAI** *(optional)* | API key for fallback STT | No |
-| **Brave Search** *(optional)* | API key for web search tool | Yes (2000 queries/month) |
+All running as Docker containers (except the voice agent, which needs PipeWire access).
 
-### System Packages
-
-Install these before starting:
+### Install
 
 ```bash
-# Ubuntu/Debian
-sudo apt install -y \
-  build-essential cmake git curl \
-  pipewire pipewire-pulse wireplumber \
-  pipewire-audio-client-libraries \
-  ffmpeg \
-  libopus-dev
-
-# Verify PipeWire is running
-pactl info | grep "Server Name"
-# Should show: PipeWire
+git clone https://github.com/AEON-7/matrix-voip-agent.git
+cd matrix-voip-agent
+bash setup-homeserver.sh
+bash setup.sh
 ```
 
-### Software to Build
+#### Step 1: `setup-homeserver.sh`
 
-| Software | Purpose | Build instructions |
-|---|---|---|
-| **whisper.cpp** | Local speech-to-text | See [Whisper Setup](#whisper-setup) below |
+This script sets up the full Matrix server infrastructure:
 
-## Architecture
+1. **Docker** — installs Docker and Docker Compose if missing
+2. **Dynamic DNS** — configures automatic DNS updates:
+   - DuckDNS (free, recommended)
+   - No-IP
+   - FreeDNS (afraid.org)
+   - Custom/manual (bring your own domain)
+3. **TLS certificates** — obtains Let's Encrypt certificates via Caddy's automatic ACME
+4. **Dendrite** — deploys the Matrix homeserver with PostgreSQL in Docker
+5. **coturn** — deploys the TURN server for WebRTC voice/video calls
+6. **Federation** — configures `.well-known` endpoints so other Matrix servers can find yours
+7. **Accounts** — creates the bot account and an admin account
+8. **Firewall** — opens required ports (443 HTTPS, 3478 TURN, 8448 federation)
+
+The script asks for:
+- Your domain (or helps you set up DuckDNS for free)
+- Email for Let's Encrypt
+- Admin and bot account passwords
+
+When it finishes, you have a fully working federated Matrix server accessible at `https://your-domain.duckdns.org`.
+
+#### Step 2: `setup.sh`
+
+This installs the voice agent and connects it to the homeserver that `setup-homeserver.sh` just created. It detects the local homeserver automatically.
+
+#### Step 3: Test
+
+1. Install Element on your phone or desktop
+2. Sign in at `https://your-domain.duckdns.org` with the admin account
+3. Start a DM with the bot account
+4. Tap the phone icon to call
+5. Talk — the agent responds in ~4 seconds
+
+### Dynamic DNS providers
+
+The homeserver setup supports these providers out of the box:
+
+| Provider | Cost | Setup | Notes |
+|---|---|---|---|
+| **DuckDNS** | Free | Create account at duckdns.org, get token | Recommended for simplicity |
+| **No-IP** | Free (with renewal) | Create account at noip.com | Requires monthly renewal on free tier |
+| **FreeDNS** | Free | Create account at freedns.afraid.org | Many domain options |
+| **Custom domain** | Varies | Point A record to your IP | Full control, requires DNS provider |
+
+For custom domains, you manage DNS yourself. The script still handles TLS certificates via Let's Encrypt.
+
+### Ports
+
+The homeserver needs these ports open (the setup script configures `ufw` if available):
+
+| Port | Protocol | Service | Required? |
+|---|---|---|---|
+| 443 | TCP | HTTPS (Caddy) | Yes |
+| 8448 | TCP | Matrix federation | Yes for federation |
+| 3478 | TCP + UDP | TURN/STUN (coturn) | Yes for voice/video calls |
+| 5349 | TCP | TURNS (TLS) | Optional, for TURN over TLS |
+| 49152-65535 | UDP | TURN relay range | Yes for voice/video calls |
+
+### Architecture (turnkey deployment)
+
+```
+Internet
+    │
+    ├── :443 ──> Caddy (TLS termination, reverse proxy)
+    │               ├── /_matrix/* ──> Dendrite (Matrix homeserver)
+    │               ├── /.well-known/* ──> Federation endpoints
+    │               └── /voice/* ──> Voice agent webhook (if using Twilio)
+    │
+    ├── :3478 ──> coturn (TURN/STUN server)
+    │
+    └── :8448 ──> Caddy ──> Dendrite (federation)
+
+Local only:
+    :8008 ──> Dendrite (client API, localhost)
+    :8178 ──> whisper-server (STT, per-call)
+    :8179 ──> Voice agent API (outbound calls)
+    :18789 ──> OpenClaw gateway (optional)
+
+DynDNS cron:
+    Every 5 min ──> updates DNS provider with current public IP
+```
+
+---
+
+## Architecture (Voice Agent)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -116,11 +226,6 @@ pactl info | grep "Server Name"
 │  │m.call.* │         └──────────┘                          │
 │  └─────────┘                                               │
 └─────────────────────────────────────────────────────────────┘
-         ↕
-    Matrix homeserver
-    (Dendrite/Synapse)
-         ↕
-    Element / any Matrix client
 ```
 
 ### Voice conversation flow
@@ -154,164 +259,38 @@ The agent can use tools during voice calls. When a tool is needed, the agent spe
 | Tool | Trigger example | Filler phrase |
 |---|---|---|
 | `get_current_time` | "What time is it?" | "Let me check the time." |
-| `check_server_status` | "Is the DGX running?" | "Checking the server now." |
+| `check_server_status` | "Is the server running?" | "Checking the server now." |
 | `run_command` | "How much disk space is left?" | "Running that command now." |
 | `web_search` | "What's the weather?" | "Let me search for that." |
 | `send_message` | "Post that in the chat" | "Sending that message now." |
 
-## Quick Start
+## Outbound Calls
 
-### 1. Install system dependencies
-
-```bash
-sudo apt install -y build-essential cmake git curl ffmpeg libopus-dev \
-  pipewire pipewire-pulse wireplumber pipewire-audio-client-libraries
-```
-
-### 2. Build whisper.cpp
+The agent can initiate calls to Matrix users via the HTTP API:
 
 ```bash
-git clone https://github.com/ggerganov/whisper.cpp.git ~/whisper.cpp
-cd ~/whisper.cpp
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
-./models/download-ggml-model.sh base    # fast, good for voice
-# Or: ./models/download-ggml-model.sh small  # slower, more accurate
-```
-
-### 3. Set up PipeWire virtual audio devices
-
-Create two loopback configs:
-
-**TTS loopback** (`~/.config/pipewire/pipewire.conf.d/voip-tts-sink.conf`):
-```
-context.modules = [
-    {
-        name = libpipewire-module-loopback
-        args = {
-            node.name = "openclaw_tts"
-            node.description = "VoIP Agent TTS"
-            capture.props = {
-                media.class = "Audio/Sink"
-                audio.position = [ FL FR ]
-            }
-            playback.props = {
-                media.class = "Audio/Source"
-                node.name = "openclaw_tts_mic"
-                node.description = "VoIP Agent TTS Microphone"
-                audio.position = [ MONO ]
-            }
-        }
-    }
-]
-```
-
-**STT loopback** (`~/.config/pipewire/pipewire.conf.d/voip-stt-source.conf`):
-```
-context.modules = [
-    {
-        name = libpipewire-module-loopback
-        args = {
-            node.name = "openclaw_stt_speaker"
-            node.description = "VoIP Agent STT Speaker"
-            capture.props = {
-                media.class = "Audio/Sink"
-                audio.position = [ FL FR ]
-            }
-            playback.props = {
-                media.class = "Audio/Source"
-                node.name = "openclaw_stt_capture"
-                node.description = "VoIP Agent STT Capture"
-                audio.position = [ MONO ]
-            }
-        }
-    }
-]
-```
-
-Then restart PipeWire:
-```bash
-systemctl --user restart pipewire.service pipewire-pulse.service
-pactl list sinks short | grep openclaw   # should show 2 sinks
-pactl list sources short | grep openclaw # should show 2 sources
-```
-
-### 4. Clone, install, configure
-
-```bash
-git clone https://github.com/AEON-7/matrix-voip-agent.git
-cd matrix-voip-agent
-npm install
-cp .env.example .env
-```
-
-Edit `.env` and fill in:
-- `MATRIX_USER_ID` and `MATRIX_ACCESS_TOKEN` (see [Generate a Matrix Access Token](#generate-a-matrix-access-token))
-- `AUTHORIZED_USERS` (who can call the bot)
-- `VLLM_BASE_URL`, `VLLM_API_KEY`, `VLLM_MODEL` (your LLM endpoint)
-- `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`
-
-### 5. Build and run
-
-```bash
-npm run build
-npm start
-```
-
-You should see:
-```
-[INFO] [main] Matrix VoIP Agent ready — waiting for calls
-[INFO] [main] API server listening on http://127.0.0.1:8179
-```
-
-### 6. Test
-
-Open Element, navigate to a DM with the bot, and tap the phone icon to call.
-
-## Generate a Matrix Access Token
-
-```bash
-curl -s -X POST https://YOUR_HOMESERVER/_matrix/client/v3/login \
-  -H 'Content-Type: application/json' \
+curl -X POST http://127.0.0.1:8179/call \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  -H "Content-Type: application/json" \
   -d '{
-    "type": "m.login.password",
-    "identifier": {"type": "m.id.user", "user": "YOUR_BOT_USERNAME"},
-    "password": "YOUR_PASSWORD",
-    "device_id": "VOIP_AGENT",
-    "initial_device_display_name": "VoIP Agent"
-  }' | python3 -m json.tool
+    "roomId": "!your-room-id:homeserver",
+    "userId": "@target-user:homeserver",
+    "greeting": "Hey, just calling to check in."
+  }'
 ```
 
-Copy the `access_token` from the response into your `.env` file.
+| Method | Path | Body | Description |
+|---|---|---|---|
+| `POST` | `/call` | `{roomId, userId, greeting?}` | Initiate outbound call |
+| `POST` | `/hangup` | `{callId}` | End an active call |
+| `GET` | `/status` | — | Get active call count |
 
-## Whisper Setup
+## Configuration Reference
 
-### Model options
+All configuration is via environment variables (loaded from `.env`). Run `bash setup.sh` to configure interactively, or edit `.env` directly.
 
-| Model | Size | Speed (CPU) | Accuracy | Best for |
-|---|---|---|---|---|
-| `tiny` | 75 MB | ~0.3s | Basic | Testing only |
-| **`base`** | 142 MB | **~1.5s** | Good | **Voice calls (recommended)** |
-| `small` | 466 MB | ~4.5s | Better | Higher accuracy needed |
-| `medium` | 1.5 GB | ~10s | Great | Non-real-time transcription |
-| `large-v3` | 3.1 GB | ~20s | Best | Offline batch processing |
-
-Download models:
-```bash
-cd ~/whisper.cpp
-./models/download-ggml-model.sh base   # recommended for voice calls
-```
-
-The agent auto-starts whisper-server when a call connects. To test manually:
-```bash
-~/whisper.cpp/build/bin/whisper-server \
-  -m ~/whisper.cpp/models/ggml-base.bin \
-  --language auto --host 127.0.0.1 --port 8178 --convert -t 8
-```
-
-## Configuration
-
-All configuration is via environment variables (loaded from `.env`):
+<details>
+<summary>Click to expand full configuration reference</summary>
 
 ### Matrix (call signaling)
 
@@ -327,7 +306,7 @@ All configuration is via environment variables (loaded from `.env`):
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `VLLM_BASE_URL` | **Yes** | `http://192.168.1.116:8000/v1` | OpenAI-compatible API endpoint |
+| `VLLM_BASE_URL` | **Yes** | — | OpenAI-compatible API endpoint |
 | `VLLM_API_KEY` | **Yes** | — | API key for the LLM server |
 | `VLLM_MODEL` | **Yes** | — | Model name as served by the LLM server |
 | `VLLM_SYSTEM_PROMPT` | No | *(built-in)* | Custom system prompt for voice conversations |
@@ -341,7 +320,6 @@ All configuration is via environment variables (loaded from `.env`):
 | `WHISPER_MODEL_PATH` | `~/whisper.cpp/models/ggml-small.bin` | Path to GGML model file |
 | `WHISPER_SERVER_BIN` | `~/whisper.cpp/build/bin/whisper-server` | Path to server binary |
 | `WHISPER_SERVER_PORT` | `8178` | HTTP port for whisper-server |
-| `WHISPER_AUTO_START` | `true` | Auto-start server on call connect |
 
 ### ElevenLabs (TTS)
 
@@ -349,20 +327,20 @@ All configuration is via environment variables (loaded from `.env`):
 |---|---|---|---|
 | `ELEVENLABS_API_KEY` | **Yes** | — | ElevenLabs API key |
 | `ELEVENLABS_VOICE_ID` | **Yes** | — | Voice ID for TTS |
-| `ELEVENLABS_MODEL` | No | `eleven_flash_v2_5` | TTS model (flash = low latency) |
+| `ELEVENLABS_MODEL` | No | `eleven_flash_v2_5` | TTS model |
 
 ### OpenAI (fallback STT)
 
 | Variable | Default | Description |
 |---|---|---|
-| `OPENAI_API_KEY` | — | Only needed if whisper fails to start |
+| `OPENAI_API_KEY` | — | Only needed if whisper fails |
 | `OPENAI_STT_MODEL` | `gpt-4o-mini-transcribe` | Realtime transcription model |
 
 ### Voice tools
 
 | Variable | Default | Description |
 |---|---|---|
-| `BRAVE_SEARCH_API_KEY` | — | Brave Search API key for `web_search` tool |
+| `BRAVE_SEARCH_API_KEY` | — | Brave Search API for `web_search` tool |
 
 ### PipeWire
 
@@ -383,44 +361,7 @@ All configuration is via environment variables (loaded from `.env`):
 | `API_TOKEN` | — | Bearer token for the HTTP API |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 
-## Outbound Calls
-
-The agent can initiate calls to Matrix users via the HTTP API:
-
-```bash
-curl -X POST http://127.0.0.1:8179/call \
-  -H "Authorization: Bearer YOUR_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "roomId": "!your-room-id:homeserver",
-    "userId": "@target-user:homeserver",
-    "greeting": "Hey, just calling to check in. How are you?"
-  }'
-```
-
-The target user's Matrix client (Element) will ring. When they answer, the agent speaks the greeting and the voice conversation begins.
-
-### API endpoints
-
-| Method | Path | Body | Description |
-|---|---|---|---|
-| `POST` | `/call` | `{roomId, userId, greeting?}` | Initiate outbound call |
-| `POST` | `/hangup` | `{callId}` | End an active call |
-| `GET` | `/status` | — | Get active call count |
-
-## Run as a systemd Service
-
-```bash
-cp systemd/matrix-voip-agent.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now matrix-voip-agent.service
-
-# Check status
-systemctl --user status matrix-voip-agent.service
-
-# View logs
-journalctl --user -u matrix-voip-agent.service -f
-```
+</details>
 
 ## Call Transcripts
 
@@ -429,45 +370,26 @@ All voice calls are automatically transcribed and saved on hangup:
 - **Markdown**: `~/matrix-voip-agent/transcripts/call-YYYY-MM-DD_HH-MM-SS.md`
 - **JSON**: `~/matrix-voip-agent/transcripts/call-YYYY-MM-DD_HH-MM-SS.json`
 
-Each transcript includes timestamps, speaker labels, and the full conversation.
+## Run as a systemd Service
 
-## TURN Server
-
-WebRTC requires a TURN server for calls that cross NAT boundaries. Your Matrix homeserver must have TURN configured (e.g., coturn).
-
-The agent fetches TURN credentials automatically from `/_matrix/client/v3/voip/turnServer`.
-
-**Important:** TURN URIs must point to the actual TURN server IP, not a domain behind Cloudflare (Cloudflare doesn't proxy UDP/TURN traffic).
-
-Test:
 ```bash
-curl -s http://127.0.0.1:8008/_matrix/client/v3/voip/turnServer \
-  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" | python3 -m json.tool
+cp systemd/matrix-voip-agent.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now matrix-voip-agent.service
+journalctl --user -u matrix-voip-agent.service -f
 ```
 
-## How It Works
+## Whisper Model Options
 
-### Inbound call (someone calls the agent)
+| Model | Size | Speed (CPU) | Accuracy | Best for |
+|---|---|---|---|---|
+| `tiny` | 75 MB | ~0.3s | Basic | Testing only |
+| **`base`** | 142 MB | **~1.5s** | Good | **Voice calls (recommended)** |
+| `small` | 466 MB | ~4.5s | Better | Higher accuracy needed |
+| `medium` | 1.5 GB | ~10s | Great | Non-real-time |
+| `large-v3` | 3.1 GB | ~20s | Best | Offline batch |
 
-1. Caller taps **Call** in Element
-2. Element sends `m.call.invite` with SDP offer
-3. Agent checks `AUTHORIZED_USERS` → rejects unauthorized callers
-4. Creates WebRTC peer connection with TURN credentials
-5. Sends `m.call.answer` with SDP answer
-6. ICE candidates exchanged, DTLS/SRTP established
-7. Audio bridge starts: WebRTC ↔ PipeWire (Opus codec)
-8. Voice pipeline starts: whisper STT → LLM → TTS
-9. Conversation flows until hangup or timeout
-
-### Outbound call (agent calls someone)
-
-1. HTTP API receives `POST /call` with room ID and target user
-2. Agent creates SDP offer and sends `m.call.invite`
-3. Target user's Element client rings
-4. When answered, agent receives `m.call.answer`
-5. WebRTC connects, voice pipeline starts
-6. Agent speaks greeting via TTS
-7. Conversation flows until hangup or timeout
+Download: `cd ~/whisper.cpp && ./models/download-ggml-model.sh base`
 
 ## License
 
