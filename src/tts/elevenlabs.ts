@@ -19,14 +19,13 @@ export class ElevenLabsTTS {
    * @param sampleRate - Output sample rate (default 24000)
    * @returns PCM 16-bit signed LE mono buffer
    */
-  async synthesize(text: string, sampleRate: number = 24000): Promise<Buffer> {
-    const outputFormat = sampleRate === 16000
-      ? "pcm_16000"
-      : sampleRate === 22050
-        ? "pcm_22050"
-        : sampleRate === 24000
-          ? "pcm_24000"
-          : "pcm_44100";
+  // Actual output sample rate after synthesis (ElevenLabs free tier only supports up to 24kHz PCM)
+  public readonly outputSampleRate = 24000;
+
+  async synthesize(text: string, _sampleRate: number = 24000): Promise<Buffer> {
+    // Always use pcm_24000 — it's available on all tiers.
+    // PipeWire handles resampling to 48kHz for WebRTC.
+    const outputFormat = "pcm_24000";
 
     const url = `https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}/stream?output_format=${outputFormat}`;
 
@@ -59,7 +58,7 @@ export class ElevenLabsTTS {
     const arrayBuf = await resp.arrayBuffer();
     const pcm = Buffer.from(arrayBuf);
 
-    logger.info(TAG, `Synthesized ${text.length} chars → ${pcm.length} bytes PCM (${sampleRate}Hz)`);
+    logger.info(TAG, `Synthesized ${text.length} chars → ${pcm.length} bytes PCM (${this.outputSampleRate}Hz)`);
     return pcm;
   }
 }

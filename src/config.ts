@@ -35,6 +35,12 @@ export interface Config {
     apiKey: string;
     sttModel: string;
   };
+  vllm: {
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+    systemPrompt: string;
+  };
   elevenlabs: {
     apiKey: string;
     voiceId: string;
@@ -89,6 +95,12 @@ export function loadConfig(): Config {
     openai: {
       apiKey: process.env.OPENAI_API_KEY || "",
       sttModel: process.env.OPENAI_STT_MODEL || "gpt-4o-transcribe",
+    },
+    vllm: {
+      baseUrl: process.env.VLLM_BASE_URL || "http://192.168.1.116:8000/v1",
+      apiKey: process.env.VLLM_API_KEY || "",
+      model: process.env.VLLM_MODEL || "vLLM_txn545_Qwen3.5-122B-A10B-NVFP4",
+      systemPrompt: process.env.VLLM_SYSTEM_PROMPT || "",
     },
     elevenlabs: {
       apiKey: process.env.ELEVENLABS_API_KEY || "",
