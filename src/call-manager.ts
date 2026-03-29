@@ -3,6 +3,7 @@ import { Config } from "./config.js";
 import { CallSession, IceServer } from "./webrtc/call-session.js";
 import { CallInvite, sendAnswer, sendCandidates, sendHangup } from "./matrix/call-signaling.js";
 import { fetchTurnCredentials, turnToIceServers } from "./matrix/turn.js";
+import { VoicePipeline } from "./voice-pipeline.js";
 import { logger } from "./logger.js";
 
 const TAG = "call-manager";
@@ -10,6 +11,7 @@ const ICE_BATCH_DELAY_MS = 2000;
 
 export class CallManager {
   private activeCalls = new Map<string, CallSession>();
+  private voicePipelines = new Map<string, VoicePipeline>();
   private iceServers: IceServer[] = [];
   private iceRefreshTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -33,6 +35,10 @@ export class CallManager {
     } catch (err) {
       logger.error(TAG, "Failed to fetch TURN credentials", err);
     }
+  }
+
+  private get voicePipelineEnabled(): boolean {
+    return !!(this.config.openai.apiKey && this.config.elevenlabs.apiKey && this.config.elevenlabs.voiceId);
   }
 
   async handleInvite(
@@ -90,6 +96,14 @@ export class CallManager {
     };
 
     session.onHangup = async (callId) => {
+      // Stop voice pipeline for this call
+      const pipeline = this.voicePipelines.get(callId);
+      if (pipeline) {
+        pipeline.stop();
+        this.voicePipelines.delete(callId);
+        logger.info(TAG, `Voice pipeline stopped for ${callId}`);
+      }
+
       this.activeCalls.delete(callId);
       if (batchTimer) clearTimeout(batchTimer);
       try {
@@ -114,6 +128,26 @@ export class CallManager {
         answerSdp
       );
       logger.info(TAG, `Call ${invite.callId} answered successfully`);
+
+      // Start voice pipeline (STT → Agent → TTS) if configured
+      if (this.voicePipelineEnabled) {
+        try {
+          const pipeline = new VoicePipeline(
+            this.config,
+            client,
+            invite.roomId,
+            invite.sender
+          );
+          await pipeline.start();
+          this.voicePipelines.set(invite.callId, pipeline);
+          logger.info(TAG, `Voice pipeline started for ${invite.callId}`);
+        } catch (err: any) {
+          logger.error(TAG, `Failed to start voice pipeline: ${err.message}`);
+          // Call still works, just no STT/TTS
+        }
+      } else {
+        logger.warn(TAG, "Voice pipeline disabled — missing OPENAI_API_KEY, ELEVENLABS_API_KEY, or ELEVENLABS_VOICE_ID");
+      }
     } catch (err: any) {
       logger.error(TAG, `Failed to answer call ${invite.callId}: ${err?.message || err}`);
       logger.error(TAG, `Stack: ${err?.stack || "no stack"}`);
@@ -148,6 +182,13 @@ export class CallManager {
     const session = this.activeCalls.get(callId);
     if (!session) return;
 
+    // Stop voice pipeline
+    const pipeline = this.voicePipelines.get(callId);
+    if (pipeline) {
+      pipeline.stop();
+      this.voicePipelines.delete(callId);
+    }
+
     session.hangup();
     this.activeCalls.delete(callId);
     logger.info(TAG, `Call ${callId} ended by remote. Active calls: ${this.activeCalls.size}`);
@@ -157,6 +198,12 @@ export class CallManager {
     if (this.iceRefreshTimer) {
       clearInterval(this.iceRefreshTimer);
     }
+
+    // Stop all voice pipelines
+    for (const [callId, pipeline] of this.voicePipelines) {
+      pipeline.stop();
+    }
+    this.voicePipelines.clear();
 
     for (const [callId, session] of this.activeCalls) {
       logger.info(TAG, `Shutting down call ${callId}`);
