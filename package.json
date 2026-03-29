@@ -9,15 +9,17 @@
     "dev": "tsc --watch"
   },
   "dependencies": {
-    "werift": "^0.22.2",
-    "opusscript": "^0.0.8",
-    "matrix-js-sdk": "^34.0.0",
     "@matrix-org/matrix-sdk-crypto-nodejs": "^0.4.0",
-    "dotenv": "^16.4.0"
+    "dotenv": "^16.4.0",
+    "matrix-js-sdk": "^34.0.0",
+    "opusscript": "^0.0.8",
+    "werift": "^0.22.2",
+    "ws": "^8.20.0"
   },
   "devDependencies": {
-    "typescript": "^5.4.0",
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.4.0"
   },
   "type": "module",
   "engines": {
