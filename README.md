@@ -155,18 +155,18 @@ This installs the voice agent and connects it to the homeserver that `setup-home
 4. Tap the phone icon to call
 5. Talk — the agent responds in ~4 seconds
 
-### Dynamic DNS providers
+### Domain options
 
-The homeserver setup supports these providers out of the box:
+The homeserver setup supports four options — pick the one that fits:
 
-| Provider | Cost | Setup | Notes |
-|---|---|---|---|
-| **DuckDNS** | Free | Create account at duckdns.org, get token | Recommended for simplicity |
-| **No-IP** | Free (with renewal) | Create account at noip.com | Requires monthly renewal on free tier |
-| **FreeDNS** | Free | Create account at freedns.afraid.org | Many domain options |
-| **Custom domain** | Varies | Point A record to your IP | Full control, requires DNS provider |
+| Option | Cost | Dynamic IP? | Setup | Best for |
+|---|---|---|---|---|
+| **Own domain** | Varies | You manage DNS | Point A record to your IP | Static IPs, full control |
+| **DuckDNS** | Free | Yes, auto-updated | Create account at duckdns.org | Home servers with changing IPs |
+| **No-IP** | Free (with renewal) | Yes, auto-updated | Create account at noip.com | Alternative to DuckDNS |
+| **FreeDNS** | Free | Yes, auto-updated | Create account at freedns.afraid.org | Many domain choices |
 
-For custom domains, you manage DNS yourself. The script still handles TLS certificates via Let's Encrypt.
+All options get automatic TLS certificates from Let's Encrypt via Caddy. If you already own a domain with a static IP, option 1 is simplest — just point your A record and go.
 
 ### Ports
 

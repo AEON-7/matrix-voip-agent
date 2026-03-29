@@ -58,15 +58,29 @@ step 2 "Domain and Dynamic DNS"
 
 echo "  How do you want to reach your Matrix server?"
 echo ""
-echo "    1) DuckDNS    — Free dynamic DNS (recommended)"
-echo "    2) No-IP      — Free dynamic DNS"
-echo "    3) FreeDNS    — Free dynamic DNS (afraid.org)"
-echo "    4) Custom domain — I have my own domain with DNS already configured"
+echo "    1) I have my own domain — Static IP or DNS already configured"
+echo "    2) DuckDNS              — Free dynamic DNS, no domain needed (recommended if no domain)"
+echo "    3) No-IP                — Free dynamic DNS"
+echo "    4) FreeDNS              — Free dynamic DNS (afraid.org)"
 echo ""
 read -p "  Choose [1-4]: " DNS_CHOICE
 
 case "$DNS_CHOICE" in
   1)
+    read -p "  Your domain (e.g., matrix.example.com): " DOMAIN
+    DNS_PROVIDER="custom"
+    PUBLIC_IP_DETECTED=$(curl -sf https://api.ipify.org || echo 'could not detect')
+    echo ""
+    echo "  Make sure your domain's A record points to this server's public IP."
+    echo "  Your public IP: $PUBLIC_IP_DETECTED"
+    echo ""
+    echo "  If your IP is static, you're all set."
+    echo "  If your IP changes, set up dynamic DNS with your registrar"
+    echo "  or re-run this script with option 2-4."
+    echo ""
+    ok "Domain: $DOMAIN (own domain, no DynDNS)"
+    ;;
+  2)
     echo ""
     echo "  Go to https://www.duckdns.org and:"
     echo "    1. Sign in (use GitHub, Google, etc.)"
@@ -79,7 +93,7 @@ case "$DNS_CHOICE" in
     DNS_PROVIDER="duckdns"
     ok "Domain: $DOMAIN"
     ;;
-  2)
+  3)
     echo ""
     echo "  Go to https://www.noip.com and create a free hostname."
     echo ""
@@ -89,7 +103,7 @@ case "$DNS_CHOICE" in
     DNS_PROVIDER="noip"
     ok "Domain: $DOMAIN"
     ;;
-  3)
+  4)
     echo ""
     echo "  Go to https://freedns.afraid.org and create a subdomain."
     echo "  Then go to 'Dynamic DNS' and copy your update URL."
@@ -97,15 +111,6 @@ case "$DNS_CHOICE" in
     read -p "  FreeDNS update URL: " FREEDNS_URL
     read -p "  Your full domain (e.g., mymatrix.mooo.com): " DOMAIN
     DNS_PROVIDER="freedns"
-    ok "Domain: $DOMAIN"
-    ;;
-  4)
-    read -p "  Your domain (e.g., matrix.example.com): " DOMAIN
-    DNS_PROVIDER="custom"
-    echo ""
-    echo "  Make sure your domain's A record points to this server's public IP."
-    echo "  Public IP: $(curl -sf https://api.ipify.org || echo 'could not detect')"
-    echo ""
     ok "Domain: $DOMAIN"
     ;;
   *)
