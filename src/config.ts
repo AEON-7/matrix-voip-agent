@@ -72,6 +72,12 @@ export interface Config {
     apiKey: string;
     model: string;
     systemPrompt: string;
+    /** Enable reasoning for tool-capable LLM calls. Default false. */
+    thinkForTools: boolean;
+    /** Filler phrase spoken if a thinking-enabled call is slow. */
+    thinkingFiller: string;
+    /** Delay before the filler fires (ms). */
+    thinkingFillerAfterMs: number;
   };
   elevenlabs: {
     apiKey: string;
@@ -154,6 +160,17 @@ export function loadConfig(): Config {
       apiKey: process.env.VLLM_API_KEY || "",
       model: process.env.VLLM_MODEL || "vLLM_txn545_Qwen3.5-122B-A10B-NVFP4",
       systemPrompt: process.env.VLLM_SYSTEM_PROMPT || "",
+      // Enable reasoning ("thinking") for tool-capable calls so the model
+      // can reason about which tool to invoke. Adds 1-3 s of LLM latency
+      // but produces better tool selection on ambiguous prompts. Off by
+      // default — paired with thinkingFiller below to mask the latency
+      // audibly when on.
+      thinkForTools: process.env.LLM_THINK_FOR_TOOLS === "true",
+      // Filler phrase spoken if the (thinking-enabled) LLM call hasn't
+      // returned within thinkingFillerAfterMs. Conversational stall-buster.
+      thinkingFiller:
+        process.env.LLM_THINKING_FILLER || "Checking on that now, give me a moment.",
+      thinkingFillerAfterMs: parseInt(process.env.LLM_THINKING_FILLER_AFTER_MS || "700", 10),
     },
     elevenlabs: {
       apiKey: process.env.ELEVENLABS_API_KEY || "",

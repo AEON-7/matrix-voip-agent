@@ -240,12 +240,26 @@ export class VoicePipeline {
     this.history.push({ role: "user", content: text });
 
     try {
-      // First, try non-streaming with tools to detect tool calls
-      const response = await this.llm.chat(this.history, this.tools);
+      // Tool-capable call. If LLM_THINK_FOR_TOOLS is enabled, the model
+      // reasons before responding (slower but smarter tool selection);
+      // we mask the wait with a one-shot "checking on that" filler.
+      let thinkingFillerSpoken = false;
+      const response = await this.llm.chat(this.history, this.tools, {
+        enableThinking: this.config.vllm.thinkForTools,
+        slowResponseAfterMs: this.config.vllm.thinkingFillerAfterMs,
+        onSlowResponse: this.config.vllm.thinkForTools
+          ? () => {
+              thinkingFillerSpoken = true;
+              this.speakSentence(this.config.vllm.thinkingFiller).catch(() => {});
+            }
+          : undefined,
+      });
 
       if (response.toolCalls.length > 0) {
-        // Tool call path — filler speech + execute + follow up
-        await this.handleToolCalls(response, t0);
+        // Tool call path — execute + follow up. Skip the per-tool filler
+        // if the thinking filler already covered the wait, to avoid
+        // double-speaking ("Checking on that..." then "Running the command...").
+        await this.handleToolCalls(response, t0, 0, thinkingFillerSpoken);
       } else if (response.content) {
         // Direct text response — speak it
         await this.speakAndLog(response.content, t0);
@@ -262,11 +276,16 @@ export class VoicePipeline {
 
   /**
    * Handle tool calls: filler speech → execute → LLM follow-up
+   *
+   * @param skipPerToolFiller — when true (because the thinking filler
+   *        already covered the wait during LLM reasoning), don't speak
+   *        the per-tool filler again. Avoids back-to-back filler speech.
    */
   private async handleToolCalls(
     response: import("./llm/vllm-client.js").ChatResponse,
     t0: number,
-    depth: number = 0
+    depth: number = 0,
+    skipPerToolFiller: boolean = false,
   ): Promise<void> {
     if (depth >= 3) {
       logger.warn(TAG, "Max tool call depth reached");
@@ -299,9 +318,11 @@ export class VoicePipeline {
         continue;
       }
 
-      // Speak filler phrase while tool executes
-      logger.info(TAG, `Tool call: ${tc.name}(${JSON.stringify(tc.arguments)}) — filler: "${tool.fillerPhrase}"`);
-      const fillerPromise = this.speakSentence(tool.fillerPhrase);
+      // Speak per-tool filler phrase while tool executes — unless the
+      // generic thinking filler already played during the LLM reasoning
+      // phase (in which case speaking again would be redundant).
+      logger.info(TAG, `Tool call: ${tc.name}(${JSON.stringify(tc.arguments)})${skipPerToolFiller ? " [filler skipped — thinking filler already spoken]" : ` — filler: "${tool.fillerPhrase}"`}`);
+      const fillerPromise = skipPerToolFiller ? Promise.resolve() : this.speakSentence(tool.fillerPhrase);
 
       // Execute tool in parallel with filler speech
       const tTool = Date.now();

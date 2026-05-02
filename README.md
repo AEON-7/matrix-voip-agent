@@ -44,7 +44,9 @@ Qwen3-ASR speaks **30 languages + 22 Chinese dialects**; Qwen3-TTS speaks **10 m
 
 ### ⚡ Sub-3-second turns via the "thinking off" trick
 
-Reasoning models like Qwen 3.6 default to "thinking" before answering — great for complex prompts, devastating for conversation latency. **This stack disables thinking by default** (`chat_template_kwargs: { enable_thinking: false }` on every chat call) and **only re-enables it when the model is about to invoke a tool**. That single config choice cuts the LLM leg from ~3 s to **~480 ms** on Qwen3.6-27B + DFlash, which is what makes the 2.1-second end-to-end voice turn possible.
+Reasoning models like Qwen 3.6 default to "thinking" before answering — great for complex prompts, devastating for conversation latency. **This stack disables thinking by default** (`chat_template_kwargs: { enable_thinking: false }` on every chat call). That single config choice cuts the LLM leg from ~3 s to **~480 ms** on Qwen3.6-27B + DFlash, which is what makes the 2.1-second end-to-end voice turn possible.
+
+Need the model to **reason** about which tool to invoke (ambiguous requests, multi-step calls)? Flip on `LLM_THINK_FOR_TOOLS=true` and thinking is selectively re-enabled on tool-capable calls. Because thinking adds 1-3 s, a generic filler phrase — *"Checking on that now, give me a moment."* — fires after a 700 ms timeout so the user hears the agent acknowledge them while it's reasoning. The per-tool filler (e.g. *"Running that command now."*) is automatically suppressed when the thinking filler already covered the wait, so you never get back-to-back stalls. Both the filler text and the trigger delay are env-tunable (`LLM_THINKING_FILLER` / `LLM_THINKING_FILLER_AFTER_MS`).
 
 ### 🔁 Full-duplex, sentence-streamed conversation
 
@@ -401,6 +403,9 @@ All configuration is via environment variables (loaded from `.env`). Run `bash s
 | `VLLM_API_KEY` | **Yes** | — | API key for the LLM server |
 | `VLLM_MODEL` | **Yes** | — | Model name as served by the LLM server |
 | `VLLM_SYSTEM_PROMPT` | No | *(built-in)* | Custom system prompt for voice conversations |
+| `LLM_THINK_FOR_TOOLS` | No | `false` | When `true`, enables `enable_thinking` on tool-capable LLM calls so the model reasons about which tool to invoke. Adds 1-3 s of LLM latency; pair with the thinking filler below to mask it audibly. |
+| `LLM_THINKING_FILLER` | No | `"Checking on that now, give me a moment."` | One-shot filler spoken if a thinking-enabled LLM call hasn't returned within the timeout. Suppresses the per-tool filler when it fires so the user never hears back-to-back stalls. |
+| `LLM_THINKING_FILLER_AFTER_MS` | No | `700` | Delay before the thinking filler fires. Below ~500 ms it'll often fire on calls that would have returned anyway; above ~1500 ms it stops being useful. |
 
 ### Backend selection
 

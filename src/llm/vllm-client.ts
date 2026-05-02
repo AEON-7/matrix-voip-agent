@@ -29,17 +29,31 @@ export class VLLMClient {
 
   /**
    * Non-streaming chat — returns full response. Supports tool calls.
+   *
+   * Latency knobs:
+   *   - opts.enableThinking — pass `true` for tool-capable calls when you
+   *     want the model to reason about which tool to call. Adds 1-3 s to
+   *     the LLM leg; pair with onSlowResponse to mask the latency audibly.
+   *   - opts.onSlowResponse — fires after `slowResponseAfterMs` (default
+   *     700 ms) if the LLM hasn't returned yet. Use this to play a
+   *     "checking on that, one moment" filler. Cleared automatically
+   *     once the response arrives or the call errors.
    */
   async chat(
     messages: ChatMessage[],
-    tools?: VoiceTool[]
+    tools?: VoiceTool[],
+    opts?: {
+      enableThinking?: boolean;
+      onSlowResponse?: () => void;
+      slowResponseAfterMs?: number;
+    }
   ): Promise<ChatResponse> {
     const body: any = {
       model: this.model,
       messages: [{ role: "system", content: this.systemPrompt }, ...messages],
       max_tokens: 512,
       temperature: 0.7,
-      chat_template_kwargs: { enable_thinking: false },
+      chat_template_kwargs: { enable_thinking: opts?.enableThinking ?? false },
     };
 
     if (tools && tools.length > 0) {
@@ -47,14 +61,29 @@ export class VLLMClient {
       body.tool_choice = "auto";
     }
 
-    const resp = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify(body),
-    });
+    // Fire a "still working" callback if the LLM is slow — most useful
+    // when enableThinking is on, since the model may take 1-3 s to reason.
+    let slowTimer: ReturnType<typeof setTimeout> | undefined;
+    if (opts?.onSlowResponse) {
+      const after = opts.slowResponseAfterMs ?? 700;
+      slowTimer = setTimeout(() => {
+        try { opts.onSlowResponse!(); } catch { /* swallow — filler is best-effort */ }
+      }, after);
+    }
+
+    let resp: Response;
+    try {
+      resp = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify(body),
+      });
+    } finally {
+      if (slowTimer) clearTimeout(slowTimer);
+    }
 
     if (!resp.ok) {
       const err = await resp.text().catch(() => "");

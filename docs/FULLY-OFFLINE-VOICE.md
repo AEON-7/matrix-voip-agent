@@ -235,6 +235,14 @@ VLLM_API_KEY=ignored                # any non-empty string works
 VLLM_MODEL=qwen36-ultimate-xs       # matches --served-model-name on the LLM container
 # VLLM_SYSTEM_PROMPT=...            # optional, sensible default baked in
 
+# ── LLM reasoning knob (default: thinking OFF for fastest convo) ──────────
+# Flip on if you want the model to reason about which tool to call (slower
+# LLM leg but smarter tool selection). Pair with the filler below so the
+# user hears acknowledgement during the reasoning wait.
+# LLM_THINK_FOR_TOOLS=true
+# LLM_THINKING_FILLER="Checking on that now, give me a moment."
+# LLM_THINKING_FILLER_AFTER_MS=700
+
 # ── Disable cloud paths ───────────────────────────────────────────────────
 WHISPER_ENABLED=false
 # ELEVENLABS_API_KEY=                # leave unset
