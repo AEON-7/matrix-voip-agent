@@ -22,6 +22,55 @@ The agent also supports **whisper.cpp** (local CPU, no GPU), **OpenAI Realtime**
 
 ---
 
+## 🎯 What this unlocks — capabilities you don't get elsewhere
+
+This isn't "voice in / voice out." Pairing this agent with the local Qwen stack opens up a handful of capabilities that are genuinely hard to get from any cloud voice API stitched together:
+
+### 🎙️ Hears more than just words
+
+Qwen3-ASR captures **paralinguistic cues** — laughter, sighs, gasps of surprise, exclamations, hesitation, filler utterances — not just the literal transcript. Your agent knows when you're joking vs serious, excited vs frustrated, certain vs hesitant. The conversation has the *texture* of human speech, not just the words.
+
+### 🎭 Speaks with matching expression
+
+Qwen3-TTS-VoiceDesign generates the corresponding expressive cues on the way back — laughter, dramatic pauses, varied prosody, sighs of mock exasperation. Combined with the ASR's emotional understanding, the agent feels like it's *participating* in the conversation, not narrating at you.
+
+### 🎨 Voice morphs mid-conversation
+
+VoiceDesign accepts a free-form natural-language voice description on **every** request. The agent's voice isn't locked at startup — mid-call it can shift from *"warm, gravelly storyteller"* to *"crisp, clinical technical assistant"* by changing one string. Adapt the voice to the topic, the user's mood, or even the current persona. Try this with any cloud TTS — you'll hit a fixed catalog of voice IDs.
+
+### 🌐 Real-time translation across dozens of languages
+
+Qwen3-ASR speaks **30 languages + 22 Chinese dialects**; Qwen3-TTS speaks **10 major languages**. End result: you talk in Spanish, the LLM reasons in English, the agent replies in French — all in the same call, no separate translation pipeline. Polyglot conversations work out of the box.
+
+### ⚡ Sub-3-second turns via the "thinking off" trick
+
+Reasoning models like Qwen 3.6 default to "thinking" before answering — great for complex prompts, devastating for conversation latency. **This stack disables thinking by default** (`chat_template_kwargs: { enable_thinking: false }` on every chat call) and **only re-enables it when the model is about to invoke a tool**. That single config choice cuts the LLM leg from ~3 s to **~480 ms** on Qwen3.6-27B + DFlash, which is what makes the 2.1-second end-to-end voice turn possible.
+
+### 🔁 Full-duplex, sentence-streamed conversation
+
+Per-sentence streaming TTS means the agent starts speaking ~1.5 s after you finish — not after the *entire* response is generated. Combined with WebRTC's bidirectional audio plane, you can interrupt mid-reply and the agent keeps listening while it's speaking. No walkie-talkie pauses.
+
+### 🌐 One Docker bridge, sub-millisecond hops
+
+All four containers (LLM main + ASR + TTS + matrix-voip-agent if same host) join one shared bridge — `aeon-stack`. Inter-service calls stay on loopback, never crossing the network for the AI loop. Latency that would be 10-30 ms across separate hosts collapses to sub-ms. The setup is one `docker network create` away — fully automated by [`agents.md`](agents.md).
+
+### 👥 Multi-room / multi-personality agents
+
+Run multiple matrix-voip-agent instances on the same backend stack — each with its own bot account, system prompt, voice description, and PipeWire devices. One bot per Matrix room means each room can have a **dedicated agent with its own topic, personality, and conversation history**:
+
+- `#help` → patient tech-support bot, neutral voice
+- `#fiction` → enthusiastic creative-writing partner, warm storyteller voice
+- `#engineering` → terse code-review bot, crisp technical voice
+- `#meditation` → calm guided-meditation bot, soft slow-paced voice
+
+All sharing the same LLM + ASR + TTS sidecars. No duplicate model loads, no GPU bloat — just one matrix-voip-agent process per personality.
+
+### 💡 Spark deployment sweet spot
+
+Co-locating all three sidecars on a single DGX Spark (128 GB unified) requires keeping the LLM main's `--gpu-memory-utilization` at **0.75** rather than the more typical 0.85+. That leaves ~10 GB for ASR and ~4 GB CUDA for TTS without OOM. Throughput cost is small; the deployment win — a complete voice agent in one box, no dedicated GPU per service — is huge. Full memory budget table and tuning matrix in [docs/FULLY-OFFLINE-VOICE.md](docs/FULLY-OFFLINE-VOICE.md).
+
+---
+
 ## Choose Your Installation Path
 
 ### Path A: I already have a Matrix server
