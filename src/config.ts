@@ -3,6 +3,21 @@ import { resolve } from "path";
 
 loadDotenv();
 
+/**
+ * STT backend selector.
+ *   "qwen"     — fully offline via aeon-7/qwen3-asr-server (RECOMMENDED, fastest, no cloud)
+ *   "whisper"  — local CPU whisper.cpp (no GPU required, slower)
+ *   "openai"   — OpenAI Realtime API (cloud, paid)
+ */
+export type SttBackend = "qwen" | "whisper" | "openai";
+
+/**
+ * TTS backend selector.
+ *   "qwen"        — fully offline via aeon-7/qwen3-tts-server (RECOMMENDED, no cloud)
+ *   "elevenlabs"  — ElevenLabs cloud API (paid)
+ */
+export type TtsBackend = "qwen" | "elevenlabs";
+
 export interface Config {
   matrix: {
     homeserverUrl: string;
@@ -20,6 +35,23 @@ export interface Config {
     ttsSource: string;
     sttCapture: string;
     ttsSink: string;
+  };
+  /** Which STT backend to use. Auto-detects if unset (prefers qwen → whisper → openai). */
+  sttBackend: SttBackend | null;
+  /** Which TTS backend to use. Auto-detects if unset (prefers qwen → elevenlabs). */
+  ttsBackend: TtsBackend | null;
+  /** Local Qwen3-ASR sidecar — aeon-7/qwen3-asr-server */
+  qwenAsr: {
+    endpoint: string;
+    model: string;
+    language: string;
+  };
+  /** Local Qwen3-TTS sidecar — aeon-7/qwen3-tts-server */
+  qwenTts: {
+    endpoint: string;
+    model: string;
+    voice: string;
+    language: string | undefined;
   };
   whisper: {
     enabled: boolean;
@@ -60,6 +92,13 @@ function requireEnv(key: string): string {
   return val;
 }
 
+function parseBackend<T extends string>(value: string | undefined, allowed: readonly T[]): T | null {
+  if (!value) return null;
+  const v = value.toLowerCase().trim() as T;
+  if ((allowed as readonly string[]).includes(v)) return v;
+  throw new Error(`Invalid backend "${value}". Allowed: ${allowed.join(", ")}`);
+}
+
 export function loadConfig(): Config {
   return {
     matrix: {
@@ -81,6 +120,20 @@ export function loadConfig(): Config {
       ttsSource: process.env.PIPEWIRE_TTS_SOURCE || "openclaw_tts_mic",
       sttCapture: process.env.PIPEWIRE_STT_CAPTURE || "openclaw_stt_capture",
       ttsSink: process.env.PIPEWIRE_TTS_SINK || "input.openclaw_tts",
+    },
+    sttBackend: parseBackend(process.env.STT_BACKEND, ["qwen", "whisper", "openai"] as const) as SttBackend | null,
+    ttsBackend: parseBackend(process.env.TTS_BACKEND, ["qwen", "elevenlabs"] as const) as TtsBackend | null,
+    qwenAsr: {
+      endpoint: process.env.QWEN_ASR_ENDPOINT || process.env.ASR_ENDPOINT || "",
+      model: process.env.QWEN_ASR_MODEL || "qwen3-asr",
+      language: process.env.QWEN_ASR_LANGUAGE || "auto",
+    },
+    qwenTts: {
+      endpoint: process.env.QWEN_TTS_ENDPOINT || process.env.TTS_ENDPOINT || "",
+      model: process.env.QWEN_TTS_MODEL || "qwen3-tts",
+      voice: process.env.QWEN_TTS_VOICE
+        || "A neutral, friendly adult voice with clear pronunciation, moderate pace, and natural intonation.",
+      language: process.env.QWEN_TTS_LANGUAGE || undefined,
     },
     whisper: {
       enabled: process.env.WHISPER_ENABLED !== "false",
