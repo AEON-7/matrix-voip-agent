@@ -2,9 +2,23 @@
 
 
 [![☕ Tips](https://img.shields.io/badge/%E2%98%95_Tips-Support_the_work-ff5e5b?style=flat)](https://github.com/AEON-7/AEON-7#-support-the-work)
-Headless Matrix WebRTC voice call agent. Auto-answers (and initiates) Matrix VoIP calls with real-time voice conversation powered by local STT, direct LLM inference, and cloud TTS.
+Headless Matrix WebRTC voice call agent. Auto-answers (and initiates) Matrix VoIP calls with real-time voice conversation.
 
-Call your AI agent from any Matrix client. The agent hears you, thinks, and talks back — all in ~4 seconds.
+Call your AI agent from any Matrix client. The agent hears you, thinks, and talks back — **fully offline in ~2.1 s** with the recommended local Qwen stack on a DGX Spark, or in ~4 s with the cloud-fallback path.
+
+## ✨ Best fully-offline voice stack — recommended pairing
+
+For the lowest latency and zero cloud dependency, pair this agent with our three companion sidecars on a single GPU host (DGX Spark / Blackwell):
+
+| sidecar | image | what it does |
+|---|---|---|
+| **[qwen3-asr-server](https://github.com/AEON-7/qwen3-asr-server)** | `ghcr.io/aeon-7/qwen3-asr-server:latest` | Speech → text (Qwen3-ASR-0.6B, RTF 16× hot) |
+| **[qwen3-tts-server](https://github.com/AEON-7/qwen3-tts-server)** | `ghcr.io/aeon-7/qwen3-tts-server:latest` | Text → speech (Qwen3-TTS-12Hz-1.7B-VoiceDesign, RTF 1.30× hot) |
+| **LLM main** — [Qwen3.6-27B AEON Ultimate MTP-XS](https://github.com/AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-DFlash) | `ghcr.io/aeon-7/vllm-aeon-ultimate-dflash:qwen36-v3` | Reasoning / chat (NVFP4 + DFlash) |
+
+End-to-end voice turn: **~2.1 s** on Spark, with no audio ever leaving your network. Full setup walkthrough → **[docs/FULLY-OFFLINE-VOICE.md](docs/FULLY-OFFLINE-VOICE.md)**.
+
+The agent also supports **whisper.cpp** (local CPU, no GPU), **OpenAI Realtime** (cloud STT), and **ElevenLabs** (cloud TTS) as fallbacks — backend selection is a single env var per leg (`STT_BACKEND` / `TTS_BACKEND`). Pick whatever suits you.
 
 ---
 
@@ -222,26 +236,34 @@ DynDNS cron:
 ## Architecture (Voice Agent)
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    matrix-voip-agent                         │
-│                                                             │
-│  ┌──────────┐   ┌──────────┐   ┌───────┐   ┌───────────┐  │
-│  │ WebRTC   │──>│ PipeWire │──>│Whisper│──>│  LLM API  │  │
-│  │ (werift) │   │ loopback │   │  STT  │   │  (vLLM)   │  │
-│  │          │<──│          │<──│       │<──│           │  │
-│  │ Opus↔PCM │   │ sink/src │   │local  │   │ direct    │  │
-│  └──────────┘   └──────────┘   └───────┘   └─────┬─────┘  │
-│       ↑                                          │        │
-│       │              ┌──────────┐                │        │
-│  ┌────┴────┐         │ElevenLabs│<───────────────┘        │
-│  │ Matrix  │         │   TTS    │                          │
-│  │signaling│         │  (cloud) │                          │
-│  │m.call.* │         └──────────┘                          │
-│  └─────────┘                                               │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                    matrix-voip-agent (this repo)                     │
+│                                                                      │
+│  ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────────────┐  │
+│  │ WebRTC   │──>│ PipeWire │──>│   STT    │──>│ LLM (vLLM HTTP)  │  │
+│  │ (werift) │   │ loopback │   │ backend  │   │  qwen36-aeon-xs  │  │
+│  │ Opus↔PCM │<──│ sink/src │<──│          │<──│  on Spark        │  │
+│  └──────────┘   └──────────┘   └──────────┘   └────────┬─────────┘  │
+│       ↑                                                │            │
+│       │                        ┌──────────┐            │            │
+│  ┌────┴────┐                   │   TTS    │<───────────┘            │
+│  │ Matrix  │                   │ backend  │                         │
+│  │signaling│                   └──────────┘                         │
+│  │m.call.* │                                                        │
+│  └─────────┘                                                        │
+└──────────────────────────────────────────────────────────────────────┘
+                STT / TTS backends are env-selectable:
+   ┌──────────────────────────────────────────────────────────────┐
+   │ STT_BACKEND=qwen      → qwen3-asr-server  (LAN HTTP, RTF 16x)│ ← recommended (offline)
+   │ STT_BACKEND=whisper   → whisper.cpp       (local CPU)        │
+   │ STT_BACKEND=openai    → OpenAI Realtime   (cloud, paid)      │
+   │                                                              │
+   │ TTS_BACKEND=qwen      → qwen3-tts-server  (LAN HTTP, RTF 1.3x)│ ← recommended (offline)
+   │ TTS_BACKEND=elevenlabs→ ElevenLabs        (cloud, paid)      │
+   └──────────────────────────────────────────────────────────────┘
 ```
 
-### Voice conversation flow
+### Voice conversation flow — recommended (fully offline)
 
 ```
 You speak into Element (~2 seconds of speech)
@@ -249,20 +271,27 @@ You speak into Element (~2 seconds of speech)
        ▼ WebRTC audio stream
 [matrix-voip-agent] Opus decode → PipeWire
        │
-       ▼ pw-record (16kHz PCM)
-[whisper.cpp] local STT, ~1.5s (base model)
+       ▼ pw-record (16kHz PCM, local VAD)
+[qwen3-asr-server] HTTP /v1/audio/transcriptions, ~120ms (RTF 16x)
        │
        ▼ transcript text
-[vLLM / LLM API] direct HTTP, thinking OFF, ~1.7s
+[vLLM main] qwen36-ultimate-xs HTTP, thinking OFF, ~480ms
        │
        ▼ response text (streamed per sentence)
-[ElevenLabs TTS] per sentence, ~0.4s
+[qwen3-tts-server] HTTP /v1/audio/speech, ~1.48s for ~2s WAV (RTF 1.30x)
        │
-       ▼ PCM audio
+       ▼ raw PCM (24kHz)
 [PipeWire] → Opus encode → WebRTC
        │
        ▼
-You hear the agent respond (~4s after you stop speaking)
+You hear the agent respond (~2.1s after you stop speaking)
+```
+
+### Voice conversation flow — fallback paths
+
+```
+[whisper.cpp local CPU + ElevenLabs cloud]: ~1.5s STT + ~1.7s LLM + ~0.4s TTS = ~4s
+[OpenAI Realtime + ElevenLabs]:             ~0.5s STT + ~1.7s LLM + ~0.4s TTS = ~3s (cloud, paid)
 ```
 
 ### Voice tools
@@ -324,7 +353,37 @@ All configuration is via environment variables (loaded from `.env`). Run `bash s
 | `VLLM_MODEL` | **Yes** | — | Model name as served by the LLM server |
 | `VLLM_SYSTEM_PROMPT` | No | *(built-in)* | Custom system prompt for voice conversations |
 
-### Whisper.cpp (local STT)
+### Backend selection
+
+| Variable | Default | Description |
+|---|---|---|
+| `STT_BACKEND` | auto | `qwen` / `whisper` / `openai`. If unset, auto-detects in that order based on what's configured. |
+| `TTS_BACKEND` | auto | `qwen` / `elevenlabs`. If unset, auto-detects in that order based on what's configured. |
+
+### Qwen3-ASR — fully offline STT (recommended)
+
+Set these to point at an [`aeon-7/qwen3-asr-server`](https://github.com/AEON-7/qwen3-asr-server) instance running on your GPU host (Spark / Blackwell). LAN-hop only, no cloud.
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `QWEN_ASR_ENDPOINT` (or `ASR_ENDPOINT`) | When `STT_BACKEND=qwen` | — | OpenAI-compatible base URL, e.g. `http://192.168.1.116:8001/v1` |
+| `QWEN_ASR_MODEL` | No | `qwen3-asr` | Served-model-name (matches `--served-model-name` on the server) |
+| `QWEN_ASR_LANGUAGE` | No | `auto` | Language hint (`en`, `zh`, `ja`, ... or `auto`) |
+
+### Qwen3-TTS — fully offline TTS (recommended)
+
+Set these to point at an [`aeon-7/qwen3-tts-server`](https://github.com/AEON-7/qwen3-tts-server) instance running on your GPU host. Returns 24 kHz mono WAV; `voice` is a free-form natural-language voice description forwarded to qwen-tts as `instruct`.
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `QWEN_TTS_ENDPOINT` (or `TTS_ENDPOINT`) | When `TTS_BACKEND=qwen` | — | OpenAI-compatible base URL, e.g. `http://192.168.1.116:8002/v1` |
+| `QWEN_TTS_MODEL` | No | `qwen3-tts` | Served-model-name |
+| `QWEN_TTS_VOICE` | No | *(neutral assistant voice)* | Free-form voice description, e.g. `"A warm, expressive adult voice with natural cadence."` |
+| `QWEN_TTS_LANGUAGE` | No | (auto-detect) | Optional language hint (`en`, `zh`, `ja`, ...) |
+
+### Whisper.cpp — local CPU STT (fallback)
+
+Use this when you don't have a GPU host for `qwen3-asr-server`. Runs entirely on the matrix-voip-agent machine's CPU.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -334,19 +393,21 @@ All configuration is via environment variables (loaded from `.env`). Run `bash s
 | `WHISPER_SERVER_BIN` | `~/whisper.cpp/build/bin/whisper-server` | Path to server binary |
 | `WHISPER_SERVER_PORT` | `8178` | HTTP port for whisper-server |
 
-### ElevenLabs (TTS)
+### ElevenLabs — cloud TTS (fallback)
+
+Cloud-paid alternative to `qwen3-tts-server`. Requires an internet round-trip per sentence.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `ELEVENLABS_API_KEY` | **Yes** | — | ElevenLabs API key |
-| `ELEVENLABS_VOICE_ID` | **Yes** | — | Voice ID for TTS |
+| `ELEVENLABS_API_KEY` | When `TTS_BACKEND=elevenlabs` | — | ElevenLabs API key |
+| `ELEVENLABS_VOICE_ID` | When `TTS_BACKEND=elevenlabs` | — | Voice ID for TTS |
 | `ELEVENLABS_MODEL` | No | `eleven_flash_v2_5` | TTS model |
 
-### OpenAI (fallback STT)
+### OpenAI Realtime — cloud STT (fallback)
 
 | Variable | Default | Description |
 |---|---|---|
-| `OPENAI_API_KEY` | — | Only needed if whisper fails |
+| `OPENAI_API_KEY` | — | Only needed when `STT_BACKEND=openai` or as a final fallback |
 | `OPENAI_STT_MODEL` | `gpt-4o-mini-transcribe` | Realtime transcription model |
 
 ### Voice tools

@@ -9,10 +9,12 @@ This file is for AI agents (OpenClaw, Claude Code, etc.) that need to integrate 
 This is a headless voice call agent for Matrix. It answers incoming VoIP calls and can initiate outbound calls. During a call, it:
 
 1. Listens to the caller via WebRTC
-2. Transcribes speech locally using whisper.cpp
-3. Sends the transcript to an LLM (via OpenAI-compatible API)
-4. Speaks the LLM response back using ElevenLabs TTS
+2. Transcribes speech via the configured STT backend (recommended: `qwen3-asr-server` over LAN HTTP — fully offline, RTF 16x; fallbacks: local whisper.cpp, OpenAI Realtime cloud)
+3. Sends the transcript to an LLM (via OpenAI-compatible API — recommended: `aeon-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-MTP-XS` on the same LAN)
+4. Speaks the LLM response back via the configured TTS backend (recommended: `qwen3-tts-server` over LAN HTTP — fully offline, RTF 1.30x; fallback: ElevenLabs cloud)
 5. Saves a full transcript when the call ends
+
+Backend selection is per-leg via `STT_BACKEND` (`qwen` / `whisper` / `openai`) and `TTS_BACKEND` (`qwen` / `elevenlabs`) env vars. The fully-offline path (both `qwen`) lands a ~2.1 s end-to-end voice turn on DGX Spark — see [docs/FULLY-OFFLINE-VOICE.md](docs/FULLY-OFFLINE-VOICE.md).
 
 The voice pipeline bypasses Matrix for the conversation loop — Matrix is only used for call signaling (ringing, answering, hanging up).
 
@@ -196,14 +198,19 @@ The system prompt can be customized via `VLLM_SYSTEM_PROMPT` in `.env`, or by ed
 ```
 Voice agent (this machine):
   :8008  ← Matrix homeserver (Dendrite, localhost)
-  :8178  ← whisper-server (auto-started per call, localhost)
+  :8178  ← whisper-server (auto-started per call when STT_BACKEND=whisper)
   :8179  ← Voice agent API (outbound calls, localhost)
   :3478  ← coturn TURN server (LAN/public)
 
-Remote:
-  vLLM server   → LLM inference (OpenAI-compatible API)
-  ElevenLabs    → Text-to-speech (cloud API)
-  Brave Search  → Web search (cloud API, optional)
+GPU host (recommended pairing — DGX Spark on the LAN):
+  :8000  → vLLM main (qwen36-aeon-xs / Qwen3.6-27B AEON Ultimate)
+  :8001  → qwen3-asr-server (Qwen3-ASR-0.6B, recommended STT)
+  :8002  → qwen3-tts-server (Qwen3-TTS-1.7B-VoiceDesign, recommended TTS)
+
+Remote / cloud (only used as fallbacks):
+  ElevenLabs    → Text-to-speech (cloud API, when TTS_BACKEND=elevenlabs)
+  OpenAI        → Realtime STT (cloud API, when STT_BACKEND=openai)
+  Brave Search  → Web search (cloud API, optional, for web_search tool)
 ```
 
 ---

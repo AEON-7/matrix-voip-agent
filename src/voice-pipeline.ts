@@ -4,7 +4,9 @@ import { writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { WhisperLocalSTT } from "./stt/whisper-local.js";
 import { OpenAIRealtimeSTT } from "./stt/openai-realtime.js";
+import { QwenAsrHttpSTT } from "./stt/qwen-asr-http.js";
 import { ElevenLabsTTS } from "./tts/elevenlabs.js";
+import { QwenTtsHttpTTS } from "./tts/qwen-tts-http.js";
 import { VLLMClient, ChatMessage, VOICE_SYSTEM_PROMPT } from "./llm/vllm-client.js";
 import { VoiceTool } from "./tools/types.js";
 import { BUILT_IN_TOOLS } from "./tools/built-in.js";
@@ -13,7 +15,8 @@ import { logger } from "./logger.js";
 
 const TAG = "voice-pipeline";
 
-type STTBackend = WhisperLocalSTT | OpenAIRealtimeSTT;
+type STTBackend = WhisperLocalSTT | OpenAIRealtimeSTT | QwenAsrHttpSTT;
+type TTSBackend = ElevenLabsTTS | QwenTtsHttpTTS;
 
 interface TranscriptEntry {
   timestamp: string;
@@ -22,21 +25,26 @@ interface TranscriptEntry {
 }
 
 /**
- * Direct voice pipeline — minimum latency path:
+ * Direct voice pipeline — minimum latency path.
  *
- * Albert speaks → Whisper STT → transcript
- *   → vLLM (direct HTTP, streamed) → sentence chunks
- *   → ElevenLabs TTS (per sentence) → PipeWire → Albert hears Celina
+ * Recommended (fully offline, ~2.1 s end-to-end voice turn on DGX Spark):
+ *   Albert speaks → qwen3-asr-server (LAN HTTP) → transcript
+ *     → vLLM (LAN HTTP, streamed) → sentence chunks
+ *     → qwen3-tts-server (LAN HTTP, per sentence) → PipeWire → Albert hears the agent
+ *
+ * Cloud / fallback paths (whisper.cpp local CPU, OpenAI Realtime, ElevenLabs)
+ * are also supported; backend selection lives in config.sttBackend / config.ttsBackend.
  *
  * No Matrix in the loop during the call. Transcript saved to file after hangup.
  */
 export class VoicePipeline {
   private stt: STTBackend | null = null;
-  private tts: ElevenLabsTTS;
+  private tts!: TTSBackend;
   private llm: VLLMClient;
   private running = false;
   private speaking = false;
-  private sttMode: "whisper" | "openai" = "whisper";
+  private sttMode: "qwen" | "whisper" | "openai" = "whisper";
+  private ttsMode: "qwen" | "elevenlabs" = "elevenlabs";
   private openaiPwRecord: childProcess.ChildProcess | null = null;
   private tools: VoiceTool[] = BUILT_IN_TOOLS;
 
@@ -51,11 +59,7 @@ export class VoicePipeline {
     private roomId: string,
     private callerUserId: string
   ) {
-    this.tts = new ElevenLabsTTS(
-      config.elevenlabs.apiKey,
-      config.elevenlabs.voiceId,
-      config.elevenlabs.model
-    );
+    this.initTTS();
 
     this.llm = new VLLMClient(
       config.vllm.baseUrl,
@@ -65,6 +69,47 @@ export class VoicePipeline {
     );
 
     this.callStartTime = new Date().toISOString();
+  }
+
+  /**
+   * Pick a TTS backend at construction time. Honors config.ttsBackend if set;
+   * otherwise auto-detects: prefers qwen (fully offline) when an endpoint is
+   * configured, falls back to elevenlabs when an API key is configured.
+   */
+  private initTTS(): void {
+    const choice = this.config.ttsBackend
+      ?? (this.config.qwenTts.endpoint ? "qwen"
+        : this.config.elevenlabs.apiKey ? "elevenlabs"
+        : null);
+
+    if (!choice) {
+      throw new Error(
+        "No TTS backend configured. Set TTS_BACKEND=qwen + QWEN_TTS_ENDPOINT (recommended, fully offline) " +
+        "or TTS_BACKEND=elevenlabs + ELEVENLABS_API_KEY."
+      );
+    }
+
+    if (choice === "qwen") {
+      if (!this.config.qwenTts.endpoint) {
+        throw new Error("TTS_BACKEND=qwen requires QWEN_TTS_ENDPOINT (e.g. http://192.168.1.116:8002/v1)");
+      }
+      this.tts = new QwenTtsHttpTTS(
+        this.config.qwenTts.endpoint,
+        this.config.qwenTts.voice,
+        this.config.qwenTts.model,
+        this.config.qwenTts.language,
+      );
+      this.ttsMode = "qwen";
+      logger.info(TAG, `TTS backend: qwen3-tts (${this.config.qwenTts.endpoint})`);
+    } else {
+      this.tts = new ElevenLabsTTS(
+        this.config.elevenlabs.apiKey,
+        this.config.elevenlabs.voiceId,
+        this.config.elevenlabs.model
+      );
+      this.ttsMode = "elevenlabs";
+      logger.info(TAG, "TTS backend: ElevenLabs (cloud)");
+    }
   }
 
   async start(): Promise<void> {
@@ -82,7 +127,41 @@ export class VoicePipeline {
   }
 
   private async startSTT(): Promise<void> {
-    if (this.config.whisper.enabled) {
+    // Resolve backend choice. Explicit STT_BACKEND wins; otherwise auto-detect
+    // in the order: qwen (fully offline, fastest) → whisper (local CPU) → openai (cloud).
+    const choice = this.config.sttBackend
+      ?? (this.config.qwenAsr.endpoint ? "qwen"
+        : this.config.whisper.enabled ? "whisper"
+        : this.config.openai.apiKey ? "openai"
+        : null);
+
+    if (!choice) {
+      throw new Error(
+        "No STT backend configured. Set STT_BACKEND=qwen + QWEN_ASR_ENDPOINT (recommended, fully offline), " +
+        "or WHISPER_ENABLED=true (local CPU), or OPENAI_API_KEY (cloud)."
+      );
+    }
+
+    // Try the chosen backend; fall through to the next-best if it fails.
+    if (choice === "qwen") {
+      try {
+        const qwen = new QwenAsrHttpSTT(
+          this.config.qwenAsr.endpoint,
+          this.config.pipewire.sttCapture,
+          this.config.qwenAsr.model,
+          this.config.qwenAsr.language,
+        );
+        await qwen.start();
+        this.stt = qwen;
+        this.sttMode = "qwen";
+        logger.info(TAG, `Using qwen3-asr-server for STT (${this.config.qwenAsr.endpoint})`);
+        return;
+      } catch (err: any) {
+        logger.warn(TAG, `qwen3-asr unavailable: ${err.message}, trying next backend`);
+      }
+    }
+
+    if (choice === "whisper" || (choice === "qwen" && this.config.whisper.enabled)) {
       try {
         const whisper = new WhisperLocalSTT(
           this.config.whisper.serverUrl,
@@ -407,7 +486,7 @@ export class VoicePipeline {
 
     // Stop STT
     if (this.stt) {
-      if (this.stt instanceof WhisperLocalSTT) {
+      if (this.stt instanceof WhisperLocalSTT || this.stt instanceof QwenAsrHttpSTT) {
         this.stt.stop();
       } else {
         (this.stt as OpenAIRealtimeSTT).disconnect();
