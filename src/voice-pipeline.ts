@@ -328,7 +328,7 @@ export class VoicePipeline {
       const tTool = Date.now();
       let result: string;
       try {
-        result = await tool.execute(tc.arguments);
+        result = await tool.execute({ ...tc.arguments, caller_user_id: this.callerUserId });
 
         // Special handling for send_message tool
         if (result.startsWith("__SEND_MATRIX__:")) {
