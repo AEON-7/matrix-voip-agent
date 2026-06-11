@@ -4,7 +4,7 @@
 
 Headless Matrix WebRTC voice **and video** call agent. Auto-answers (and initiates) Matrix VoIP calls with real-time voice conversation powered by local STT, direct LLM inference, and local or cloud TTS.
 
-Call your AI agent from any Matrix client. The agent hears you, thinks, and talks back — in ~4 seconds with the whisper.cpp + ElevenLabs pipeline, or ~2 seconds with the local [qwen3-asr-server](https://github.com/AEON-7/qwen3-asr-server) + [qwen3-tts-server](https://github.com/AEON-7/qwen3-tts-server) sidecars.
+Call your AI agent from any Matrix client. The agent hears you, thinks, and talks back — in ~4 seconds with the whisper.cpp + ElevenLabs pipeline, or **starting at ~1 second** with the local [qwen3-asr-server](https://github.com/AEON-7/qwen3-asr-server) + [qwen3-tts-server](https://github.com/AEON-7/qwen3-tts-server) sidecars and streaming TTS (~2 s for a fully synthesized reply).
 
 **Optional video add-on:** share your camera during a classic 1:1 Element video call and the agent can *see*. Inbound VP8 frames are sampled into a small in-memory JPEG ring buffer (never written to disk), and the LLM gets a per-call `look` tool to pull frames on demand — ask "what do you see?" and a vision-capable model answers from live camera frames. Off by default; voice-only calls behave exactly as before. See the [Video Calling QuickStart](#video-calling-quickstart-optional-add-on).
 
@@ -15,10 +15,10 @@ For the lowest latency and zero cloud dependency, pair this agent with our three
 | sidecar | image | what it does |
 |---|---|---|
 | **[qwen3-asr-server](https://github.com/AEON-7/qwen3-asr-server)** | `ghcr.io/aeon-7/qwen3-asr-server:latest` | Speech → text (Qwen3-ASR-0.6B, RTF 16× hot) — wired via `OMNI_ASR_*` |
-| **[qwen3-tts-server](https://github.com/AEON-7/qwen3-tts-server)** | `ghcr.io/aeon-7/qwen3-tts-server:latest` | Text → speech (Qwen3-TTS-12Hz-1.7B-VoiceDesign, RTF 1.30× hot) — wired via `VOXTRAL_*` |
+| **[qwen3-tts-server](https://github.com/AEON-7/qwen3-tts-server)** | `ghcr.io/aeon-7/qwen3-tts-server:latest` | Text → speech (Qwen3-TTS-12Hz-1.7B VoiceDesign + Base voice-clone on the [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts) CUDA-graph engine — **streams PCM while generating**, ~1.7× realtime measured, first audio ~0.4 s) — wired via `VOXTRAL_*` |
 | **LLM main** — [Qwen3.6-27B AEON Ultimate MTP-XS](https://github.com/AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-DFlash) | `ghcr.io/aeon-7/vllm-aeon-ultimate-dflash:qwen36-v3` | Reasoning / chat (NVFP4 + DFlash) — wired via `VLLM_*` |
 
-End-to-end voice turn: **~2.1 s** on Spark, with no audio ever leaving your network. Full sidecar walkthrough → **[docs/FULLY-OFFLINE-VOICE.md](docs/FULLY-OFFLINE-VOICE.md)**; whole-stack runbook → **[AGENTS.md](AGENTS.md)**.
+End-to-end voice turn: **~2.1 s** to a fully synthesized reply on Spark — and with streaming TTS enabled (`VOXTRAL_STREAMING=true`) the agent **starts speaking at ~1.0 s**, since the TTS leg drops from ~1.5 s full-WAV synthesis to ~0.4 s time-to-first-audio. No audio ever leaves your network. Full sidecar walkthrough → **[docs/FULLY-OFFLINE-VOICE.md](docs/FULLY-OFFLINE-VOICE.md)**; whole-stack runbook → **[AGENTS.md](AGENTS.md)**.
 
 The agent also supports **whisper.cpp** (local CPU, no GPU), **OpenAI Realtime** (cloud STT), and **ElevenLabs** (cloud TTS) as fallbacks — each leg is switched per env var (`OMNI_ASR_ENABLED` / `WHISPER_ENABLED` for STT, `VOXTRAL_ENABLED` / `ELEVENLABS_API_KEY` for TTS). Pick whatever suits you.
 
@@ -40,7 +40,7 @@ Qwen3-TTS-VoiceDesign generates the corresponding expressive cues on the way bac
 
 ### 🎨 Voice morphs mid-conversation
 
-VoiceDesign accepts a free-form natural-language voice description on **every** request (`VOXTRAL_VOICE_DESCRIPTION`). The agent's voice isn't locked at startup — mid-call it can shift from *"warm, gravelly storyteller"* to *"crisp, clinical technical assistant"* by changing one string. Try this with any cloud TTS — you'll hit a fixed catalog of voice IDs.
+VoiceDesign accepts a free-form natural-language voice description on **every** request (`VOXTRAL_VOICE_DESCRIPTION`). The agent's voice isn't locked at startup — mid-call it can shift from *"warm, gravelly storyteller"* to *"crisp, clinical technical assistant"* by changing one string. Try this with any cloud TTS — you'll hit a fixed catalog of voice IDs. The server also exposes a **voice-clone mode** (Qwen3-TTS-12Hz-1.7B-Base, served as `qwen3-tts-clone` alongside `qwen3-tts`): point `VOXTRAL_TTS_MODE=voice_clone` + `VOXTRAL_VOICE_CLONE_REF_AUDIO`/`_REF_TEXT` at a reference sample, or pick a pre-cloned voice from the server's `GET /v1/audio/voices` library.
 
 ### 🌐 Real-time translation across dozens of languages
 
@@ -50,9 +50,14 @@ Qwen3-ASR speaks **30 languages + 22 Chinese dialects**; Qwen3-TTS speaks **10 m
 
 Reasoning models default to "thinking" before answering — great for complex prompts, devastating for conversation latency. This agent keeps thinking **off for casual chat** (`VLLM_VOICE_THINKING_MODE=auto` enables it only for genuinely hard questions), which cuts the LLM leg to ~480 ms on Qwen3.6-27B + DFlash. Tool-capable calls can reason about which tool to invoke (`VLLM_VOICE_TOOLS_THINKING=on`), and filler phrases — *"Let me check on that."* — cover the wait so the caller never wonders if the line went dead.
 
-### 🔁 Full-duplex, sentence-streamed conversation
+### 🔁 Full-duplex, streamed conversation
 
-Per-sentence streaming TTS (`VOICE_TTS_RESPONSE_MODE=chunked`) means the agent starts speaking shortly after you finish — not after the *entire* response is generated. Combined with WebRTC's bidirectional audio plane, no walkie-talkie pauses.
+Two streaming mechanisms keep the agent from going walkie-talkie on you:
+
+- **Realtime TTS streaming** (`VOXTRAL_STREAMING=true`, the recommended default with qwen3-tts-server): the server sends raw PCM chunks *while the GPU is still generating* (`stream: true` + `response_format: "pcm"` on `/v1/audio/speech`), and the agent pipes them straight into PipeWire as they arrive. Measured on Spark: first audio in **~0.4 s**, then ~2 s of audio delivered every ~1.16 s of wall time (~1.7× realtime) — playback starts almost immediately and never underruns, instead of waiting ~13 s for a 22 s reply to fully synthesize.
+- **Per-sentence chunking** (`VOICE_TTS_RESPONSE_MODE=chunked`): the LLM response is synthesized and spoken sentence-by-sentence — useful for TTS backends that can't stream (e.g. ElevenLabs).
+
+Combined with WebRTC's bidirectional audio plane, no walkie-talkie pauses.
 
 ### 👥 Multi-room / multi-personality agents
 
@@ -501,16 +506,22 @@ All configuration is via environment variables (loaded from `.env`). Run `bash s
 
 Configure **one** TTS backend: the local Qwen3-TTS sidecar (recommended, lowest latency) or ElevenLabs cloud TTS.
 
-**Local TTS — [qwen3-tts-server](https://github.com/AEON-7/qwen3-tts-server) (OpenAI-compatible `/v1/audio/speech`):**
+**Local TTS — [qwen3-tts-server](https://github.com/AEON-7/qwen3-tts-server) (OpenAI-compatible `/v1/audio/speech`, streaming-capable via the [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts) backend):**
 
 | Variable | Default | Description |
 |---|---|---|
 | `VOXTRAL_ENABLED` | `false` | Use the local OpenAI-compatible TTS server |
-| `VOXTRAL_BASE_URL` | *(example LAN value)* | TTS server base URL, e.g. `http://your-tts-server:8091/v1` |
-| `VOXTRAL_VOICE` | `cheerful_female` | Voice name |
-| `VOXTRAL_MODEL` | *(example value)* | Model name as served |
+| `VOXTRAL_BASE_URL` | *(example LAN value)* | TTS server base URL, e.g. `http://your-tts-server:8002/v1` |
+| `VOXTRAL_STREAMING` | `false` | **Recommended `true` with qwen3-tts-server**: request `stream: true` + `response_format: "pcm"` and pipe raw PCM (s16le mono 24 kHz) into playback as chunks arrive — first audio ~0.4 s instead of waiting for full synthesis |
+| `VOXTRAL_API_KEY` | — | Bearer token if the server requires auth |
+| `VOXTRAL_VOICE` | `cheerful_female` | Voice name (designed voice, or a cloned voice from `GET /v1/audio/voices`) |
+| `VOXTRAL_MODEL` | *(example value)* | Model name as served (e.g. `qwen3-tts`; `qwen3-tts-clone` for clone mode) |
 | `VOXTRAL_VOICE_DESCRIPTION` | — | VoiceDesign-style voice description |
+| `VOXTRAL_VOICE_STYLE_FIELD` | `instructions` | Request field carrying the voice description (`instructions`/`prompt`/`instruct`/`none`) |
+| `VOXTRAL_VOICE_STYLE_TEMPLATE` | — | Optional template for the style block (`{voice}`/`{delivery}`/`{text}` tokens) |
 | `VOXTRAL_LANGUAGE` | `English` | Synthesis language |
+| `VOXTRAL_TTS_TIMEOUT_MS` | `120000` | Synthesis request timeout |
+| `VOXTRAL_TTS_MODE` | — | `voice_clone` to use the clone model with `VOXTRAL_VOICE_CLONE_REF_AUDIO` / `VOXTRAL_VOICE_CLONE_REF_TEXT` (reference sample + transcript) |
 
 **Cloud TTS — ElevenLabs:**
 

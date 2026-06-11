@@ -137,7 +137,7 @@ WHISPER_ENABLED=false                            # optional: skip the local whis
 
 ## 5. TTS server — qwen3-tts-server
 
-OpenAI-compatible `/v1/audio/speech`, Qwen3-TTS VoiceDesign (~1.5 s synthesis for 2 s of speech). Deploy per its README:
+OpenAI-compatible `/v1/audio/speech` serving Qwen3-TTS-12Hz-1.7B (VoiceDesign + Base voice-clone) through the [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts) CUDA-graph engine. **Supports realtime streaming**: with `stream: true` it sends PCM/WAV chunks while still generating — measured on Spark: first audio ~0.4 s, ~1.7× realtime throughput (vs ~1.5 s full-WAV synthesis for a ~2 s reply non-streaming). Deploy per its README:
 
 ```bash
 git clone https://github.com/AEON-7/qwen3-tts-server.git
@@ -148,7 +148,9 @@ Wire it in via the `VOXTRAL_*` env vars (historical prefix — it speaks to any 
 
 ```bash
 VOXTRAL_ENABLED=true
-VOXTRAL_BASE_URL=http://192.168.1.116:8091/v1    # example — your TTS host
+VOXTRAL_BASE_URL=http://192.168.1.116:8002/v1    # example — your TTS host
+VOXTRAL_STREAMING=true                           # stream PCM chunks as generated — first audio ~0.4 s
+VOXTRAL_API_KEY=your-tts-token                   # bearer token, if the server requires auth
 VOXTRAL_VOICE=cheerful_female
 VOXTRAL_VOICE_DESCRIPTION="A warm, friendly female voice"   # VoiceDesign-style
 ```

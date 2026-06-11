@@ -41,9 +41,16 @@ in 2 seconds per turn." Every step is concrete and copy-pasteable.
 | inbound RTP packet → matrix-voip-agent | ~5 ms |
 | ASR (1.92 s clip → text) | 120 ms |
 | LLM (Qwen3.6-27B chat completion, ~10 toks) | ~480 ms |
-| TTS (text → 1.92 s WAV) | ~1.48 s |
+| TTS, streaming (`VOXTRAL_STREAMING=true`) — time to first audio | **~0.4 s** |
+| TTS, non-streaming (text → 1.92 s WAV, full synthesis) | ~1.48 s |
 | outbound RTP → Matrix client | ~5 ms |
-| **End-to-end voice turn** | **~2.1 s** |
+| **End-to-end: agent starts speaking (streaming TTS)** | **~1.0 s** |
+| **End-to-end: full reply synthesized (non-streaming)** | **~2.1 s** |
+
+The TTS server generates at **~1.7× realtime** (measured: a 22 s reply
+streams ~2 s of audio every ~1.16 s of wall time), so once playback
+starts at the first chunk it never underruns — long replies begin in
+~0.4 s instead of after ~13 s of full synthesis.
 
 ## Preconditions
 
@@ -142,6 +149,16 @@ echo "TTS ready"
 
 Full doc: https://github.com/AEON-7/qwen3-tts-server
 
+The streaming-capable build serves the stock Qwen3-TTS-12Hz-1.7B weights
+(VoiceDesign + Base voice-clone) through the
+[faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts)
+CUDA-graph engine, which yields PCM/WAV chunks *while generation is still
+running* (`stream: true` on `/v1/audio/speech`). Confirm your build
+streams by checking `/health` for `"backend": "faster-qwen3-tts"` — older
+qwen-tts-SDK builds only return complete files. (DGX Spark ARM64/CUDA 13
+packaging of the engine:
+[mARTin-B78/dgx-spark-faster-qwen3-tts](https://github.com/mARTin-B78/dgx-spark-faster-qwen3-tts).)
+
 ### 1e. Smoke test all three from the GPU host
 
 ```bash
@@ -157,6 +174,15 @@ curl -s http://localhost:8002/v1/audio/speech \
   -d '{"model":"qwen3-tts","input":"hello, this is a test","response_format":"wav"}' \
   --output /tmp/smoke.wav
 ls -la /tmp/smoke.wav   # should be ~80 KB
+
+# TTS streaming — chunks should start arriving in well under a second
+# (response is chunked transfer-encoding, audio bytes flow while the GPU
+#  is still generating; add -H "Authorization: Bearer ..." if your server
+#  is configured with an API key)
+curl -sN http://localhost:8002/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3-tts","input":"hello, this is a streaming test","response_format":"wav","stream":true}' \
+  --output /tmp/smoke-stream.wav
 
 # ASR — transcribe the WAV we just made
 curl -s -X POST http://localhost:8001/v1/audio/transcriptions \
@@ -224,6 +250,11 @@ OMNI_ASR_MODEL=qwen3-asr
 VOXTRAL_ENABLED=true
 VOXTRAL_BASE_URL=http://${SPARK_HOST}:8002/v1
 VOXTRAL_MODEL=qwen3-tts
+# Realtime streaming: raw PCM chunks are piped into playback as the GPU
+# generates them — the agent starts speaking at the first chunk (~0.4 s)
+# instead of waiting for the full WAV. Strongly recommended.
+VOXTRAL_STREAMING=true
+# VOXTRAL_API_KEY=                   # only if your TTS server requires auth
 # Free-form VoiceDesign-style description of the voice you want:
 VOXTRAL_VOICE_DESCRIPTION="A warm, expressive adult voice with natural cadence."
 # VOXTRAL_LANGUAGE=English           # optional
@@ -277,6 +308,10 @@ Watch the logs for these lines on first call:
 [voxtral-tts] Synthesized 31 chars -> 92204 bytes PCM
 ```
 
+(With `VOXTRAL_STREAMING=true` the second line is a
+`Streaming TTS 31 chars voice=... model=qwen3-tts` debug entry instead —
+PCM is piped into playback as it arrives rather than counted up front.)
+
 If you see whisper.cpp starting up instead of the `omni-asr` lines, your
 `OMNI_ASR_ENABLED` / `OMNI_ASR_BASE_URL` env vars aren't being picked up —
 check that `.env` is in the agent's working directory.
@@ -288,7 +323,9 @@ check that `.env` is in the agent's working directory.
 3. Start a DM with the bot account.
 4. Tap the phone icon to start a voice call.
 5. Wait for the bot to auto-answer (~1 s), then talk.
-6. The bot transcribes you, thinks, and responds — first audio in ~2.1 s.
+6. The bot transcribes you, thinks, and responds — first audio in ~1.0 s
+   with `VOXTRAL_STREAMING=true` (~2.1 s if you left streaming off and
+   wait for the full WAV).
 
 You can watch the latency in real time in the agent logs:
 
@@ -299,7 +336,8 @@ You can watch the latency in real time in the agent logs:
 [voxtral-tts]    Synthesized 31 chars -> 92204 bytes PCM
 ```
 
-**~2.1 s end-to-end.** Hang up — the transcript is auto-saved to
+**~1.0 s to first audio (streaming), ~2.1 s for the full reply.** Hang
+up — the transcript is auto-saved to
 `~/matrix-voip-agent/transcripts/call-YYYY-MM-DD_HH-MM-SS.md`.
 
 ## Common issues
@@ -314,10 +352,12 @@ The agent can't reach the ASR endpoint. Check:
 
 ### TTS plays back at the wrong pitch / speed
 
-The agent reads the actual sample rate from the WAV header on every
-synthesis call (`outputSampleRate`) and passes it to `pw-play -r ...`.
-If you're seeing pitch issues, that path is bypassed somehow — confirm
-you're on the latest agent code. Don't hardcode 24 kHz on the client side.
+The agent plays TTS output at the backend's declared rate
+(`outputSampleRate`, 24 kHz for qwen3-tts-server — both as WAV and as the
+streaming raw-PCM path) and passes it to `pw-play --rate ...`. If you're
+seeing pitch issues, your TTS server is emitting a different sample rate —
+check the `x-audio-sample-rate` response header (qwen3-tts-server reports
+`24000`).
 
 ### LLM response is slow (>2 s)
 
@@ -369,7 +409,8 @@ new backend is picked up on the next call.
 - **Privacy.** No audio bytes ever leave your network. ASR transcript and
   the LLM hop both stay on your LAN; only Matrix federation packets cross
   the public internet (and those are E2EE-capable).
-- **Latency.** ~2.1 s end-to-end vs ~4 s for whisper.cpp + ElevenLabs and
+- **Latency.** ~1.0 s to first audio with streaming TTS (~2.1 s for a
+  fully synthesized reply) vs ~4 s for whisper.cpp + ElevenLabs and
   ~3 s for OpenAI Realtime + ElevenLabs. The LAN hop in place of the
   internet hop saves 100-300 ms per leg.
 - **Cost.** Zero recurring spend. ElevenLabs charges per character;

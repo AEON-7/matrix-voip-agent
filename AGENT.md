@@ -208,7 +208,7 @@ Voice agent (this machine):
 Remote (LAN or cloud):
   vLLM server       → LLM inference (OpenAI-compatible API; vision-capable model for video)
   qwen3-asr-server  → STT, OpenAI-compatible /v1/audio/transcriptions (optional, OMNI_ASR_*)
-  qwen3-tts-server  → TTS, OpenAI-compatible /v1/audio/speech (optional, VOXTRAL_*)
+  qwen3-tts-server  → TTS, OpenAI-compatible /v1/audio/speech, streams PCM while generating (optional, VOXTRAL_*)
   ElevenLabs        → Text-to-speech (cloud API, alternative to local TTS)
   Brave Search      → Web search (cloud API, optional)
 ```
