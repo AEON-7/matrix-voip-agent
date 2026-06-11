@@ -1,10 +1,69 @@
 # matrix-voip-agent
 
+[![☕ Tips](https://img.shields.io/badge/%E2%98%95_Tips-Support_the_work-ff5e5b?style=flat)](https://github.com/AEON-7/AEON-7#-support-the-work)
+
 Headless Matrix WebRTC voice **and video** call agent. Auto-answers (and initiates) Matrix VoIP calls with real-time voice conversation powered by local STT, direct LLM inference, and local or cloud TTS.
 
 Call your AI agent from any Matrix client. The agent hears you, thinks, and talks back — in ~4 seconds with the whisper.cpp + ElevenLabs pipeline, or ~2 seconds with the local [qwen3-asr-server](https://github.com/AEON-7/qwen3-asr-server) + [qwen3-tts-server](https://github.com/AEON-7/qwen3-tts-server) sidecars.
 
 **Optional video add-on:** share your camera during a classic 1:1 Element video call and the agent can *see*. Inbound VP8 frames are sampled into a small in-memory JPEG ring buffer (never written to disk), and the LLM gets a per-call `look` tool to pull frames on demand — ask "what do you see?" and a vision-capable model answers from live camera frames. Off by default; voice-only calls behave exactly as before. See the [Video Calling QuickStart](#video-calling-quickstart-optional-add-on).
+
+## ✨ Best fully-offline voice stack — recommended pairing
+
+For the lowest latency and zero cloud dependency, pair this agent with our three companion sidecars on a single GPU host (DGX Spark / Blackwell):
+
+| sidecar | image | what it does |
+|---|---|---|
+| **[qwen3-asr-server](https://github.com/AEON-7/qwen3-asr-server)** | `ghcr.io/aeon-7/qwen3-asr-server:latest` | Speech → text (Qwen3-ASR-0.6B, RTF 16× hot) — wired via `OMNI_ASR_*` |
+| **[qwen3-tts-server](https://github.com/AEON-7/qwen3-tts-server)** | `ghcr.io/aeon-7/qwen3-tts-server:latest` | Text → speech (Qwen3-TTS-12Hz-1.7B-VoiceDesign, RTF 1.30× hot) — wired via `VOXTRAL_*` |
+| **LLM main** — [Qwen3.6-27B AEON Ultimate MTP-XS](https://github.com/AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-DFlash) | `ghcr.io/aeon-7/vllm-aeon-ultimate-dflash:qwen36-v3` | Reasoning / chat (NVFP4 + DFlash) — wired via `VLLM_*` |
+
+End-to-end voice turn: **~2.1 s** on Spark, with no audio ever leaving your network. Full sidecar walkthrough → **[docs/FULLY-OFFLINE-VOICE.md](docs/FULLY-OFFLINE-VOICE.md)**; whole-stack runbook → **[AGENTS.md](AGENTS.md)**.
+
+The agent also supports **whisper.cpp** (local CPU, no GPU), **OpenAI Realtime** (cloud STT), and **ElevenLabs** (cloud TTS) as fallbacks — each leg is switched per env var (`OMNI_ASR_ENABLED` / `WHISPER_ENABLED` for STT, `VOXTRAL_ENABLED` / `ELEVENLABS_API_KEY` for TTS). Pick whatever suits you.
+
+## 🎯 What this unlocks — capabilities you don't get elsewhere
+
+This isn't "voice in / voice out." Pairing this agent with the local Qwen stack opens up capabilities that are genuinely hard to get from any cloud voice API stitched together:
+
+### 👁️ Sees through the camera (video add-on)
+
+Place a video call and the agent gains eyes: a `look` tool pulls live camera frames into a vision-capable LLM mid-conversation. Show it a circuit board, a plant, an error on another screen — and ask. Frames stay in RAM and die with the call.
+
+### 🎙️ Hears more than just words
+
+Qwen3-ASR captures **paralinguistic cues** — laughter, sighs, gasps of surprise, exclamations, hesitation, filler utterances — not just the literal transcript. Your agent knows when you're joking vs serious, excited vs frustrated, certain vs hesitant.
+
+### 🎭 Speaks with matching expression
+
+Qwen3-TTS-VoiceDesign generates the corresponding expressive cues on the way back — laughter, dramatic pauses, varied prosody, sighs of mock exasperation. The agent feels like it's *participating* in the conversation, not narrating at you.
+
+### 🎨 Voice morphs mid-conversation
+
+VoiceDesign accepts a free-form natural-language voice description on **every** request (`VOXTRAL_VOICE_DESCRIPTION`). The agent's voice isn't locked at startup — mid-call it can shift from *"warm, gravelly storyteller"* to *"crisp, clinical technical assistant"* by changing one string. Try this with any cloud TTS — you'll hit a fixed catalog of voice IDs.
+
+### 🌐 Real-time translation across dozens of languages
+
+Qwen3-ASR speaks **30 languages + 22 Chinese dialects**; Qwen3-TTS speaks **10 major languages**. You talk in Spanish, the LLM reasons in English, the agent replies in French — all in the same call, no separate translation pipeline.
+
+### ⚡ Sub-3-second turns via the "thinking off" trick
+
+Reasoning models default to "thinking" before answering — great for complex prompts, devastating for conversation latency. This agent keeps thinking **off for casual chat** (`VLLM_VOICE_THINKING_MODE=auto` enables it only for genuinely hard questions), which cuts the LLM leg to ~480 ms on Qwen3.6-27B + DFlash. Tool-capable calls can reason about which tool to invoke (`VLLM_VOICE_TOOLS_THINKING=on`), and filler phrases — *"Let me check on that."* — cover the wait so the caller never wonders if the line went dead.
+
+### 🔁 Full-duplex, sentence-streamed conversation
+
+Per-sentence streaming TTS (`VOICE_TTS_RESPONSE_MODE=chunked`) means the agent starts speaking shortly after you finish — not after the *entire* response is generated. Combined with WebRTC's bidirectional audio plane, no walkie-talkie pauses.
+
+### 👥 Multi-room / multi-personality agents
+
+Run multiple matrix-voip-agent instances on the same backend stack — each with its own bot account, system prompt, voice description, and PipeWire devices. One bot per Matrix room means each room can have a **dedicated agent with its own topic, personality, and conversation history**:
+
+- `#help` → patient tech-support bot, neutral voice
+- `#fiction` → enthusiastic creative-writing partner, warm storyteller voice
+- `#engineering` → terse code-review bot, crisp technical voice
+- `#meditation` → calm guided-meditation bot, soft slow-paced voice
+
+All sharing the same LLM + ASR + TTS sidecars. No duplicate model loads, no GPU bloat — just one agent process per personality. The per-persona systemd pattern is in [AGENTS.md](AGENTS.md#multi-persona-deployments).
 
 ---
 
@@ -553,3 +612,38 @@ Download: `cd ~/whisper.cpp && ./models/download-ggml-model.sh base`
 ## License
 
 MIT
+
+---
+
+## ☕ Support the work
+
+If this release has been useful, tips are deeply appreciated — they go directly toward more compute, more models, and more open releases.
+
+<table align="center">
+  <tr>
+    <td align="center" width="50%">
+      <strong>₿ Bitcoin (BTC)</strong><br/>
+      <img src="https://raw.githubusercontent.com/AEON-7/AEON-7/main/assets/qr/btc.png" alt="BTC QR" width="200"/><br/>
+      <sub><code>bc1q09xmzn00q4z3c5raene0f3pzn9d9pvawfm0py4</code></sub>
+    </td>
+    <td align="center" width="50%">
+      <strong>Ξ Ethereum (ETH)</strong><br/>
+      <img src="https://raw.githubusercontent.com/AEON-7/AEON-7/main/assets/qr/eth.png" alt="ETH QR" width="200"/><br/>
+      <sub><code>0x1512667F6D61454ad531d2E45C0a5d1fd82D0500</code></sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <strong>◎ Solana (SOL)</strong><br/>
+      <img src="https://raw.githubusercontent.com/AEON-7/AEON-7/main/assets/qr/sol.png" alt="SOL QR" width="200"/><br/>
+      <sub><code>DgQsjHdAnT5PNLQTNpJdpLS3tYGpVcsHQCkpoiAKsw8t</code></sub>
+    </td>
+    <td align="center" width="50%">
+      <strong>ⓜ Monero (XMR)</strong><br/>
+      <img src="https://raw.githubusercontent.com/AEON-7/AEON-7/main/assets/qr/xmr.png" alt="XMR QR" width="200"/><br/>
+      <sub><code>836XrSKw4R76vNi3QPJ5Fa9ugcyvE2cWmKSPv3AhpTNNKvqP8v5ba9JRL4Vh7UnFNjDz3E2GXZDVVenu3rkZaNdUFhjAvgd</code></sub>
+    </td>
+  </tr>
+</table>
+
+> **Ethereum L2s (Base, Arbitrum, Optimism, Polygon, etc.) and EVM-compatible tokens** can be sent to the same Ethereum address.

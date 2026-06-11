@@ -5,9 +5,23 @@ This file is a machine-readable deployment guide for AI agents (and humans) brin
 - To **integrate with or control an already-running agent** (outbound-call API, voice tools, transcripts), read **[AGENT.md](AGENT.md)** instead.
 - For the user-facing install walkthrough, read **[README.md](README.md)**.
 
-All commands assume a Linux host with a non-root user. Components are listed in dependency order — deploy top to bottom.
+All commands assume a Linux host with a non-root user. Components are listed in dependency order — deploy top to bottom. The deep-dive companion for the GPU sidecar bring-up (Docker commands, latency budget, memory tuning) is **[docs/FULLY-OFFLINE-VOICE.md](docs/FULLY-OFFLINE-VOICE.md)**.
 
 > **Example values:** any `192.168.x.x` address or `*.example.com` / `*.duckdns.org` domain in this file is a placeholder. Substitute your own hosts.
+
+## What you can do autonomously vs. what needs a human
+
+**Agent-handleable** — do these without asking: install packages and Docker, pull/start the sidecar containers, run `setup.sh` / `setup-homeserver.sh` (use `--auto` when `.env` is pre-populated), edit `.env`, build, restart systemd user units, tail journalctl, run every smoke test below.
+
+**Human-required — STOP and escalate before continuing:**
+
+- **Hardware procurement** — if the GPU host for steps 4–6 doesn't exist, ask the human to provision one (DGX Spark validated).
+- **Domain name** (turnkey homeserver only) — owned domain or a free DuckDNS subdomain; the human chooses.
+- **Public IP / router port forwarding** — the human must forward the ports in step 2 ([docs/firewall/](docs/firewall/) has per-router guides). Don't guess router config.
+- **Email for Let's Encrypt** and **account passwords** (admin + bot) — the human chooses; don't generate.
+- **Pre-existing homeserver credentials** (bring-your-own path) — homeserver URL, bot user ID, fresh access token.
+- **Approval to switch voice backends** if a working whisper.cpp + ElevenLabs setup already exists.
+- **API tokens for optional tools** (`BRAVE_SEARCH_API_KEY`, `ELEVENLABS_API_KEY`, ...) — created by the human on the provider's site.
 
 ---
 
