@@ -1,5 +1,18 @@
 node_modules/
 dist/
-.env
+
+# Local state — never publish
 crypto-store/
 transcripts/
+backups/
+secrets/
+
+# Env files and ad-hoc backups (only the example template is tracked)
+.env
+.env.*
+!.env.example
+.env.bak*
+*.bak*
+
+# Voice reference blobs
+*.b64

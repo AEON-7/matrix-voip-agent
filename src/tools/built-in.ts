@@ -9,7 +9,7 @@ const TAG = "tools";
 
 const getCurrentTime: VoiceTool = {
   name: "get_current_time",
-  description: "Get the current date and time",
+  description: "Current local date and time.",
   parameters: {},
   fillerPhrase: "Let me check the time.",
   async execute() {
@@ -22,7 +22,7 @@ const getCurrentTime: VoiceTool = {
 
 const checkServerStatus: VoiceTool = {
   name: "check_server_status",
-  description: "Check if the vLLM inference server on the DGX Spark is running and healthy",
+  description: "Check DGX Spark vLLM health and served models.",
   parameters: {},
   fillerPhrase: "Checking the server now.",
   async execute() {
@@ -50,9 +50,9 @@ const checkServerStatus: VoiceTool = {
 
 const runShellCommand: VoiceTool = {
   name: "run_command",
-  description: "Run a simple shell command on the local system and return the output. Use for system checks like disk usage, uptime, process status, etc.",
+  description: "Run a simple safe local shell command for system checks.",
   parameters: {
-    command: { type: "string", description: "The shell command to run (keep it simple and safe)" },
+    command: { type: "string", description: "Simple safe command" },
   },
   fillerPhrase: "Running that command now.",
   async execute(args) {
@@ -76,9 +76,9 @@ const runShellCommand: VoiceTool = {
 
 const webSearch: VoiceTool = {
   name: "web_search",
-  description: "Search the web for current information. Use when asked about news, weather, facts you don't know, or anything that requires up-to-date information.",
+  description: "Search the web for current information.",
   parameters: {
-    query: { type: "string", description: "The search query" },
+    query: { type: "string", description: "Search query" },
   },
   fillerPhrase: "Let me search for that.",
   async execute(args) {
@@ -112,9 +112,9 @@ const webSearch: VoiceTool = {
 
 const sendMatrixMessage: VoiceTool = {
   name: "send_message",
-  description: "Send a text message in the Matrix chat room. Use when the caller asks you to write or post something in the chat.",
+  description: "Send a text message in the Matrix room.",
   parameters: {
-    message: { type: "string", description: "The message to send" },
+    message: { type: "string", description: "Message text" },
   },
   fillerPhrase: "Sending that message now.",
   async execute(args) {

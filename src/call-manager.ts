@@ -4,6 +4,7 @@ import { CallSession, IceServer } from "./webrtc/call-session.js";
 import { CallInvite, sendAnswer, sendInvite, sendCandidates, sendHangup } from "./matrix/call-signaling.js";
 import { fetchTurnCredentials, turnToIceServers } from "./matrix/turn.js";
 import { VoicePipeline } from "./voice-pipeline.js";
+import { OmniVoicePipeline } from "./voice-pipeline-omni.js";
 import { logger } from "./logger.js";
 
 const TAG = "call-manager";
@@ -11,7 +12,7 @@ const ICE_BATCH_DELAY_MS = 2000;
 
 export class CallManager {
   private activeCalls = new Map<string, CallSession>();
-  private voicePipelines = new Map<string, VoicePipeline>();
+  private voicePipelines = new Map<string, VoicePipeline | OmniVoicePipeline>();
   private iceServers: IceServer[] = [];
   private iceRefreshTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -37,8 +38,31 @@ export class CallManager {
     }
   }
 
+  private get hasClassicSttBackend(): boolean {
+    return !!(
+      (process.env.OMNI_ASR_ENABLED === "true") ||
+      (process.env.MAC_ASR_URL && process.env.MAC_ASR_API_KEY) ||
+      this.config.whisper.enabled ||
+      this.config.openai.apiKey
+    );
+  }
+
+  private get hasClassicTtsBackend(): boolean {
+    return !!(
+      (this.config.voxtral.enabled && this.config.voxtral.baseUrl) ||
+      (this.config.elevenlabs.apiKey && this.config.elevenlabs.voiceId)
+    );
+  }
+
   private get voicePipelineEnabled(): boolean {
-    return !!(this.config.openai.apiKey && this.config.elevenlabs.apiKey && this.config.elevenlabs.voiceId);
+    return this.hasClassicSttBackend && this.hasClassicTtsBackend;
+  }
+
+  private get voicePipelineDisabledReason(): string {
+    const missing: string[] = [];
+    if (!this.hasClassicSttBackend) missing.push("STT backend (MAC_ASR, Whisper, or OpenAI STT)");
+    if (!this.hasClassicTtsBackend) missing.push("TTS backend (Voxtral or ElevenLabs)");
+    return missing.join(", ") || "unknown";
   }
 
   async handleInvite(
@@ -66,7 +90,8 @@ export class CallManager {
       this.iceServers,
       this.config.pipewire.sttSink,
       this.config.pipewire.ttsSource,
-      this.config.calls.timeoutMs
+      this.config.calls.timeoutMs,
+      this.config.video
     );
 
     // Batch local ICE candidates (Matrix spec: 2s batching window)
@@ -129,24 +154,22 @@ export class CallManager {
       );
       logger.info(TAG, `Call ${invite.callId} answered successfully`);
 
-      // Start voice pipeline (STT → Agent → TTS) if configured
-      if (this.voicePipelineEnabled) {
+      // Start voice pipeline — omni mode (audio-native) or classic (STT → LLM → TTS)
+      if (this.config.omni.enabled || this.voicePipelineEnabled) {
         try {
-          const pipeline = new VoicePipeline(
-            this.config,
-            client,
-            invite.roomId,
-            invite.sender
-          );
+          const pipeline = this.config.omni.enabled
+            ? new OmniVoicePipeline(this.config, client, invite.roomId, invite.sender)
+            : new VoicePipeline(this.config, client, invite.roomId, invite.sender, session.videoFrameSource);
           await pipeline.start();
           this.voicePipelines.set(invite.callId, pipeline);
-          logger.info(TAG, `Voice pipeline started for ${invite.callId}`);
+          const mode = this.config.omni.enabled ? "omni" : "classic";
+          logger.info(TAG, `Voice pipeline started for ${invite.callId} (mode: ${mode})`);
         } catch (err: any) {
           logger.error(TAG, `Failed to start voice pipeline: ${err.message}`);
           // Call still works, just no STT/TTS
         }
       } else {
-        logger.warn(TAG, "Voice pipeline disabled — missing OPENAI_API_KEY, ELEVENLABS_API_KEY, or ELEVENLABS_VOICE_ID");
+        logger.warn(TAG, `Voice pipeline disabled - missing ${this.voicePipelineDisabledReason}`);
       }
     } catch (err: any) {
       logger.error(TAG, `Failed to answer call ${invite.callId}: ${err?.message || err}`);
@@ -202,7 +225,8 @@ export class CallManager {
       this.iceServers,
       this.config.pipewire.sttSink,
       this.config.pipewire.ttsSource,
-      this.config.calls.timeoutMs
+      this.config.calls.timeoutMs,
+      this.config.video
     );
 
     // Batch local ICE candidates
@@ -248,9 +272,11 @@ export class CallManager {
       logger.info(TAG, `Outbound call ${callId} invite sent, waiting for answer...`);
 
       // Start voice pipeline with greeting
-      if (this.voicePipelineEnabled && greeting) {
+      if ((this.config.omni.enabled || this.voicePipelineEnabled) && greeting) {
         try {
-          const pipeline = new VoicePipeline(this.config, client, roomId, targetUserId);
+          const pipeline = this.config.omni.enabled
+            ? new OmniVoicePipeline(this.config, client, roomId, targetUserId)
+            : new VoicePipeline(this.config, client, roomId, targetUserId, session.videoFrameSource);
           await pipeline.start();
           this.voicePipelines.set(callId, pipeline);
           // Speak the greeting once connected

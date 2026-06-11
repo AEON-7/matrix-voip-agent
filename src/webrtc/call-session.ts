@@ -5,8 +5,14 @@ import {
   RtpPacket,
   useAbsSendTime,
   useSdesMid,
+  type RTCRtpTransceiver,
 } from "werift";
 import { AudioBridge } from "../audio/audio-bridge.js";
+import {
+  VideoFrameSampler,
+  type VideoSamplerConfig,
+  type VideoFrameSource,
+} from "../video/frame-sampler.js";
 import { logger } from "../logger.js";
 
 const TAG = "call-session";
@@ -34,6 +40,8 @@ export class CallSession {
 
   private pc: RTCPeerConnection | null = null;
   private audioBridge: AudioBridge | null = null;
+  private videoSampler: VideoFrameSampler | null = null;
+  private videoTransceiver: RTCRtpTransceiver | null = null;
   private pendingCandidates: RTCIceCandidate[] = [];
   private timeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -53,7 +61,8 @@ export class CallSession {
     private iceServers: IceServer[],
     private sttSink: string,
     private ttsSource: string,
-    private callTimeoutMs: number
+    private callTimeoutMs: number,
+    private videoConfig?: VideoSamplerConfig
   ) {
     this.callId = callId;
     this.roomId = roomId;
@@ -80,11 +89,29 @@ export class CallSession {
       direction: "sendrecv",
     });
 
-    // Handle remote track (incoming audio from caller)
-    // werift's onTrack emits MediaStreamTrack directly
+    // Accept the caller's camera only when the offer actually carries a video
+    // m-line — voice-only offers take the exact same path as before. Holding
+    // the transceiver gives us receiver.sendRtcpPLI for keyframe requests.
+    const offerHasVideo = /^m=video\s/m.test(offerSdp);
+    if (offerHasVideo && this.videoConfig?.enabled) {
+      this.videoTransceiver = this.pc.addTransceiver("video", {
+        direction: "recvonly",
+      });
+      logger.info(TAG, "Offer contains video — added recvonly video transceiver");
+    }
+
+    // Handle remote tracks. werift's onTrack emits MediaStreamTrack directly,
+    // once per sending remote m-line — a video call fires this twice. Video
+    // must never reach the audio bridge (it would feed VP8 to the Opus
+    // decoder and double-drive the audio sender).
     this.pc.onTrack.subscribe((mediaTrack: any) => {
       const track = mediaTrack.track ?? mediaTrack;
-      logger.info(TAG, `Remote track received: ${track.kind ?? "audio"}`);
+      const kind = track.kind ?? "audio";
+      logger.info(TAG, `Remote track received: ${kind}`);
+      if (kind === "video") {
+        this.startVideoSampler(track);
+        return;
+      }
       this.startAudioBridge(
         track,
         (pkt: RtpPacket) => transceiver.sender.sendRtp(pkt)
@@ -159,9 +186,16 @@ export class CallSession {
       direction: "sendrecv",
     });
 
+    // Outbound offers are audio-only, so a remote answer cannot add video —
+    // the kind guard here is defensive only.
     this.pc.onTrack.subscribe((mediaTrack: any) => {
       const track = mediaTrack.track ?? mediaTrack;
-      logger.info(TAG, `Remote track received: ${track.kind ?? "audio"}`);
+      const kind = track.kind ?? "audio";
+      logger.info(TAG, `Remote track received: ${kind}`);
+      if (kind === "video") {
+        this.startVideoSampler(track);
+        return;
+      }
       this.startAudioBridge(
         track,
         (pkt: RtpPacket) => transceiver.sender.sendRtp(pkt)
@@ -245,6 +279,51 @@ export class CallSession {
     this.audioBridge.start(remoteTrack, sendRtp);
   }
 
+  /**
+   * Start the fail-soft video frame sampler for a remote video track.
+   * Any failure here is logged and swallowed — the audio call continues.
+   */
+  private startVideoSampler(track: any): void {
+    if (!this.videoConfig?.enabled) {
+      logger.info(TAG, "Video track ignored (video disabled)");
+      return;
+    }
+    if (this.videoSampler) {
+      logger.warn(TAG, "Video sampler already running, ignoring extra video track");
+      return;
+    }
+    try {
+      const sampler = new VideoFrameSampler(this.videoConfig);
+      sampler.attach(track, (): boolean => {
+        const receiver =
+          this.videoTransceiver?.receiver ??
+          this.pc?.getTransceivers().find((t) => t.kind === "video")?.receiver;
+        const ssrc: number | undefined = track.ssrc;
+        if (receiver && typeof ssrc === "number") {
+          receiver.sendRtcpPLI(ssrc).catch((err: any) => {
+            logger.debug(TAG, `PLI send failed: ${err.message}`);
+          });
+          return true;
+        }
+        // ssrc not learned yet (offer without a=ssrc) — sampler retries on
+        // the first received RTP packet, which teaches werift the ssrc.
+        return false;
+      });
+      this.videoSampler = sampler;
+    } catch (err: any) {
+      logger.error(TAG, `Failed to start video sampler: ${err.message}`);
+    }
+  }
+
+  /** Frame accessor for the voice pipeline / look tool. Safe when no video. */
+  get videoFrameSource(): VideoFrameSource {
+    return {
+      isActive: () => this.videoSampler?.isActive() ?? false,
+      getFrames: (count: number, spreadSeconds?: number) =>
+        this.videoSampler?.getFrames(count, spreadSeconds) ?? [],
+    };
+  }
+
   hangup(): void {
     if (this.state === "hangup") return;
     this.state = "hangup";
@@ -256,6 +335,14 @@ export class CallSession {
 
     this.audioBridge?.stop();
     this.audioBridge = null;
+
+    try {
+      this.videoSampler?.stop();
+    } catch {
+      // fail soft — never let video cleanup break hangup
+    }
+    this.videoSampler = null;
+    this.videoTransceiver = null;
 
     if (this.pc) {
       try {

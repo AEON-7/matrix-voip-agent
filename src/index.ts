@@ -4,6 +4,17 @@ import { setLogLevel, logger } from "./logger.js";
 import { createMatrixClient } from "./matrix/client.js";
 import { registerCallHandlers } from "./matrix/call-signaling.js";
 import { CallManager } from "./call-manager.js";
+import { BUILT_IN_TOOLS } from "./tools/built-in.js";
+
+// Prevent EPIPE and other unhandled errors from crashing the process
+process.on("uncaughtException", (err) => {
+  if ((err as any).code === "EPIPE") return; // ignore broken pipe
+  console.error("Uncaught exception:", err);
+});
+process.on("unhandledRejection", (err) => {
+  console.error("Unhandled rejection:", err);
+});
+
 
 const TAG = "main";
 
@@ -18,6 +29,15 @@ async function main(): Promise<void> {
   logger.info(TAG, `Max concurrent calls: ${config.calls.maxConcurrent}`);
   logger.info(TAG, `PipeWire STT sink: ${config.pipewire.sttSink}`);
   logger.info(TAG, `PipeWire TTS source: ${config.pipewire.ttsSource}`);
+  logger.info(
+    TAG,
+    `Voice tools: ${BUILT_IN_TOOLS.map((t) => t.name).join(", ")} (+look, registered per-call when video is active)`
+  );
+  logger.info(
+    TAG,
+    `Video: enabled=${config.video.enabled}, fps=${config.video.frameFps}, width=${config.video.frameWidth}, ` +
+      `ring=${config.video.ringSize}, autoAttach=${config.video.autoAttach}`
+  );
 
   // Connect to Matrix
   const client = await createMatrixClient(config);

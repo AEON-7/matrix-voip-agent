@@ -1,8 +1,10 @@
 # matrix-voip-agent
 
-Headless Matrix WebRTC voice call agent. Auto-answers (and initiates) Matrix VoIP calls with real-time voice conversation powered by local STT, direct LLM inference, and cloud TTS.
+Headless Matrix WebRTC voice **and video** call agent. Auto-answers (and initiates) Matrix VoIP calls with real-time voice conversation powered by local STT, direct LLM inference, and local or cloud TTS.
 
-Call your AI agent from any Matrix client. The agent hears you, thinks, and talks back — all in ~4 seconds.
+Call your AI agent from any Matrix client. The agent hears you, thinks, and talks back — in ~4 seconds with the whisper.cpp + ElevenLabs pipeline, or ~2 seconds with the local [qwen3-asr-server](https://github.com/AEON-7/qwen3-asr-server) + [qwen3-tts-server](https://github.com/AEON-7/qwen3-tts-server) sidecars.
+
+**Optional video add-on:** share your camera during a classic 1:1 Element video call and the agent can *see*. Inbound VP8 frames are sampled into a small in-memory JPEG ring buffer (never written to disk), and the LLM gets a per-call `look` tool to pull frames on demand — ask "what do you see?" and a vision-capable model answers from live camera frames. Off by default; voice-only calls behave exactly as before. See the [Video Calling QuickStart](#video-calling-quickstart-optional-add-on).
 
 ---
 
@@ -40,6 +42,8 @@ Two scripts, fully automated. When they finish, you have a production Matrix ser
 After install completes, point your AI agent to **[AGENT.md](AGENT.md)** — it has the full API reference, tool catalog, and integration patterns so the agent can begin using its new voice calling and messaging capabilities immediately.
 
 **[Jump to Path B details](#path-b-turnkey-matrix-server--voice-agent)**
+
+> Deploying the **whole stack** — homeserver, TURN, STT/TTS sidecars, vLLM, and a fleet of per-persona agents? See **[AGENTS.md](AGENTS.md)** for the full-stack deployment runbook (written for AI agents and humans alike).
 
 ---
 
@@ -115,7 +119,7 @@ After running two scripts, you'll have:
 | **Caddy** | Reverse proxy with automatic HTTPS via Let's Encrypt |
 | **coturn** | TURN/STUN server for WebRTC NAT traversal |
 | **DynDNS updater** | Keeps your domain pointed at your IP (DuckDNS, No-IP, or custom) |
-| **matrix-voip-agent** | AI voice agent with STT, LLM, and TTS |
+| **matrix-voip-agent** | AI voice agent with STT, LLM, and TTS (plus the optional video add-on) |
 
 All running as Docker containers (except the voice agent, which needs PipeWire access).
 
@@ -198,8 +202,7 @@ Internet
     │
     ├── :443 ──> Caddy (TLS termination, reverse proxy)
     │               ├── /_matrix/* ──> Dendrite (Matrix homeserver)
-    │               ├── /.well-known/* ──> Federation endpoints
-    │               └── /voice/* ──> Voice agent webhook (if using Twilio)
+    │               └── /.well-known/* ──> Federation endpoints
     │
     ├── :3478 ──> coturn (TURN/STUN server)
     │
@@ -214,6 +217,75 @@ Local only:
 DynDNS cron:
     Every 5 min ──> updates DNS provider with current public IP
 ```
+
+---
+
+## Video Calling QuickStart (optional add-on)
+
+The video add-on lets the agent see through the caller's camera during a classic 1:1 Matrix video call. It is **off by default** and changes nothing for voice-only calls — the audio path is byte-identical with video disabled.
+
+### Requirements
+
+- **ffmpeg** on `PATH` (installed by `setup.sh`)
+- A **vision-capable** OpenAI-compatible model behind `VLLM_BASE_URL` (tested with Gemma-4-26B multimodal on vLLM)
+- **Element Web/Desktop classic 1:1 video calls** (legacy `m.call.*` signaling). Element Call / MatrixRTC group calls are not supported.
+
+### How it works
+
+When an incoming call offer contains a video m-line and `VIDEO_ENABLED=true`, the agent accepts video receive-only:
+
+```
+VP8 RTP ──> jitter buffer + depacketize (werift, whole frames)
+        ──> one persistent ffmpeg per call:
+            -vf fps=1,scale=512:-2  (excess frames dropped BEFORE decode)
+        ──> MJPEG ──> in-memory ring buffer (last 8 JPEGs, never on disk)
+```
+
+The LLM decides when to look: a per-call `look` tool returns the freshest 1–4 frames as images, optionally spread over the last N seconds for motion context. For always-on vision, `VIDEO_AUTO_ATTACH=latest` attaches the freshest frame to every user turn instead — costlier in tokens, but zero extra latency when the model needs eyes constantly.
+
+### Enable it (3 steps)
+
+1. Set `VIDEO_ENABLED=true` in the agent's `.env`
+2. Restart the agent: `systemctl --user restart matrix-voip-agent.service`
+3. Place a **video call** from Element and ask: *"what do you see?"*
+
+Expected log lines on a successful video call:
+
+```
+[call-session]  Offer contains video — added recvonly video transceiver
+[frame-sampler] Video sampler started (fps=1, width=512, ring=8)
+[frame-sampler] First video frame decoded (24681 bytes)
+```
+
+### Video configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `VIDEO_ENABLED` | `false` | Master switch. Per-agent opt-in — `dist/` may be shared by many persona units |
+| `VIDEO_FRAME_FPS` | `1` | Frames/sec kept by ffmpeg's `fps` filter. Frames above this rate are dropped **before** decode, so CPU cost stays flat regardless of the caller's camera frame rate |
+| `VIDEO_FRAME_WIDTH` | `512` | Output JPEG width; height keeps aspect ratio |
+| `VIDEO_RING_SIZE` | `8` | JPEGs retained in the per-call in-memory ring buffer |
+| `VIDEO_AUTO_ATTACH` | `off` | `off` = the model pulls frames on demand via the `look` tool. `latest` = always-on vision: the freshest frame is attached to every user turn |
+| `VIDEO_LOOK_IMAGE_ROLE` | `tool` | Where `look`'s image parts ride. Set `user` if your model's chat template rejects images inside tool messages |
+
+### Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| No `Offer contains video` log line | The offer carried no VP8 video m-line — place a **video** call (camera icon), not a voice call, from Element Web/Desktop |
+| `Video sampler started` but no `First video frame decoded` | The decoder is starved of a keyframe. The sampler sends RTCP PLI keyframe requests automatically (at start, on first RTP, and on every 5 s stall) — if frames still never decode, suspect heavy packet loss or TURN relay issues |
+| LLM rejects `look` results (chat template error on images in tool messages) | Set `VIDEO_LOOK_IMAGE_ROLE=user` so frames ride in a follow-up user message instead |
+| `ffmpeg spawn failed, video sampling disabled` | Install ffmpeg (`sudo apt install ffmpeg`). Video failures are fail-soft — audio keeps working |
+
+Validate the ffmpeg sampling path without placing a call:
+
+```bash
+npm run build && node scripts/smoke-video.mjs
+```
+
+### Privacy
+
+Camera frames live **only in RAM**, in a small per-call ring buffer, and are discarded on hangup. Nothing is ever written to disk; call transcripts remain text-only.
 
 ---
 
@@ -236,6 +308,21 @@ DynDNS cron:
 │  │signaling│         │  (cloud) │                          │
 │  │m.call.* │         └──────────┘                          │
 │  └─────────┘                                               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+With the video add-on enabled, a receive-only side path feeds camera frames to the LLM:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  video add-on (optional)                     │
+│                                                             │
+│  VP8 RTP ──> depacketize ──> ffmpeg (1 per call) ──> JPEG   │
+│  (werift)    (whole VP8      fps drop + scale +      ring   │
+│              frames)         mjpeg encode            (RAM)  │
+│                                                       │     │
+│              look tool / VIDEO_AUTO_ATTACH=latest  <──┘     │
+│              (frames ride to the LLM as image parts)        │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -274,6 +361,9 @@ The agent can use tools during voice calls. When a tool is needed, the agent spe
 | `run_command` | "How much disk space is left?" | "Running that command now." |
 | `web_search` | "What's the weather?" | "Let me search for that." |
 | `send_message` | "Post that in the chat" | "Sending that message now." |
+| `look` | "What do you see?" | "Let me take a look." |
+
+`look` is registered per-call, only when the active call has a live video track — voice-only calls present the exact same tool list as before. It returns 1–4 camera frames from the in-memory ring buffer as images (`frames`, `spread_seconds` parameters).
 
 ## Outbound Calls
 
@@ -310,17 +400,33 @@ All configuration is via environment variables (loaded from `.env`). Run `bash s
 | `MATRIX_HOMESERVER_URL` | No | `http://127.0.0.1:8008` | Matrix homeserver URL |
 | `MATRIX_USER_ID` | **Yes** | — | Bot's full Matrix user ID |
 | `MATRIX_ACCESS_TOKEN` | **Yes** | — | Access token for the bot account |
+| `MATRIX_DEVICE_ID` | No | `OPENCLAW_VOICE` | Fixed device ID for the bot session |
 | `MATRIX_DEVICE_NAME` | No | `OpenClaw Voice` | Device name in Matrix sessions |
 | `AUTHORIZED_USERS` | **Yes** | — | Comma-separated Matrix user IDs allowed to call |
+
+### Matrix E2EE (encrypted rooms)
+
+| Variable | Default | Description |
+|---|---|---|
+| `MATRIX_E2EE_ENABLED` | `true` | Enable Olm/Megolm encryption support |
+| `MATRIX_E2EE_REQUIRED` | `false` | Refuse to operate in unencrypted rooms |
+| `MATRIX_RECOVERY_KEY_FILE` | `./secrets/recovery-key.txt` | File containing the recovery key (keep `secrets/` out of git) |
+| `MATRIX_CRYPTO_STORE_PASSWORD` | — | Passphrase for the local crypto store |
+| `MATRIX_AUTO_CROSS_SIGN` | `true` | Auto cross-sign the device on startup |
+| `MATRIX_RESTORE_KEY_BACKUP_ON_START` | `true` | Restore key backup at startup |
+| `CRYPTO_STORE_PATH` | `./crypto-store` | Local crypto store directory |
 
 ### LLM (direct inference)
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `VLLM_BASE_URL` | **Yes** | — | OpenAI-compatible API endpoint |
-| `VLLM_API_KEY` | **Yes** | — | API key for the LLM server |
-| `VLLM_MODEL` | **Yes** | — | Model name as served by the LLM server |
+| `VLLM_BASE_URL` | **Yes** | *(example LAN value — set your own)* | OpenAI-compatible API endpoint. Must serve a vision-capable model if you enable the video add-on |
+| `VLLM_API_KEY` | No | — | API key for the LLM server (blank for local vLLM) |
+| `VLLM_MODEL` | **Yes** | *(example value — set your own)* | Model name as served by the LLM server |
 | `VLLM_SYSTEM_PROMPT` | No | *(built-in)* | Custom system prompt for voice conversations |
+| `VLLM_TEMPERATURE` | No | `0` | Sampling temperature |
+| `VLLM_VOICE_THINKING_MODE` | No | `auto` | `on`/`off`/`auto` — reasoning for hard questions |
+| `VOICE_HISTORY_MAX_MESSAGES` | No | `24` | In-call history cap (trimmed to `VOICE_HISTORY_KEEP_MESSAGES`, default 12) |
 
 ### Whisper.cpp (local STT)
 
@@ -332,20 +438,60 @@ All configuration is via environment variables (loaded from `.env`). Run `bash s
 | `WHISPER_SERVER_BIN` | `~/whisper.cpp/build/bin/whisper-server` | Path to server binary |
 | `WHISPER_SERVER_PORT` | `8178` | HTTP port for whisper-server |
 
-### ElevenLabs (TTS)
+### TTS backends (pick one)
+
+Configure **one** TTS backend: the local Qwen3-TTS sidecar (recommended, lowest latency) or ElevenLabs cloud TTS.
+
+**Local TTS — [qwen3-tts-server](https://github.com/AEON-7/qwen3-tts-server) (OpenAI-compatible `/v1/audio/speech`):**
+
+| Variable | Default | Description |
+|---|---|---|
+| `VOXTRAL_ENABLED` | `false` | Use the local OpenAI-compatible TTS server |
+| `VOXTRAL_BASE_URL` | *(example LAN value)* | TTS server base URL, e.g. `http://your-tts-server:8091/v1` |
+| `VOXTRAL_VOICE` | `cheerful_female` | Voice name |
+| `VOXTRAL_MODEL` | *(example value)* | Model name as served |
+| `VOXTRAL_VOICE_DESCRIPTION` | — | VoiceDesign-style voice description |
+| `VOXTRAL_LANGUAGE` | `English` | Synthesis language |
+
+**Cloud TTS — ElevenLabs:**
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `ELEVENLABS_API_KEY` | **Yes** | — | ElevenLabs API key |
-| `ELEVENLABS_VOICE_ID` | **Yes** | — | Voice ID for TTS |
+| `ELEVENLABS_API_KEY` | If used | — | ElevenLabs API key |
+| `ELEVENLABS_VOICE_ID` | If used | — | Voice ID for TTS |
 | `ELEVENLABS_MODEL` | No | `eleven_flash_v2_5` | TTS model |
+
+### Alternate STT backends
+
+Besides whisper.cpp, any OpenAI-compatible `/v1/audio/transcriptions` server works — e.g. [qwen3-asr-server](https://github.com/AEON-7/qwen3-asr-server):
+
+| Variable | Default | Description |
+|---|---|---|
+| `OMNI_ASR_ENABLED` | `false` | Use an OpenAI-compatible ASR server instead of whisper.cpp |
+| `OMNI_ASR_BASE_URL` | *(falls back to `VLLM_BASE_URL`)* | ASR server base URL |
+| `OMNI_ASR_MODEL` | *(falls back to `VLLM_MODEL`)* | ASR model name |
+| `OMNI_ASR_API_KEY` | — | API key if the server requires one |
 
 ### OpenAI (fallback STT)
 
 | Variable | Default | Description |
 |---|---|---|
 | `OPENAI_API_KEY` | — | Only needed if whisper fails |
-| `OPENAI_STT_MODEL` | `gpt-4o-mini-transcribe` | Realtime transcription model |
+| `OPENAI_STT_MODEL` | `gpt-4o-transcribe` | Realtime transcription model |
+
+### Video add-on
+
+See the **[Video Calling QuickStart](#video-calling-quickstart-optional-add-on)** for the `VIDEO_*` knobs (`VIDEO_ENABLED`, `VIDEO_FRAME_FPS`, `VIDEO_FRAME_WIDTH`, `VIDEO_RING_SIZE`, `VIDEO_AUTO_ATTACH`, `VIDEO_LOOK_IMAGE_ROLE`).
+
+### Voice persona and memory
+
+| Variable | Default | Description |
+|---|---|---|
+| `VOICE_CALLER_NAME` | `caller` | Name the LLM uses for the caller |
+| `VOICE_MEMORY_ENABLED` | `true` | Inject memory/persona files into the system prompt |
+| `VOICE_MEMORY_PATHS` | *(OpenClaw workspace files)* | Comma-separated markdown files to inject |
+| `VOICE_MEMORY_MAX_CHARS` | `12000` | Total memory budget |
+| `VOICE_TTS_RESPONSE_MODE` | `chunked` | `chunked` speaks per sentence; `full` waits for the whole reply |
 
 ### Voice tools
 
@@ -389,6 +535,8 @@ systemctl --user daemon-reload
 systemctl --user enable --now matrix-voip-agent.service
 journalctl --user -u matrix-voip-agent.service -f
 ```
+
+Running **multiple agent personas** from one build (shared `dist/`, per-persona `.env` + working directory)? See **[AGENTS.md](AGENTS.md#multi-persona-deployments)** for the parameterized unit pattern.
 
 ## Whisper Model Options
 

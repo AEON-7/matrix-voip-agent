@@ -2,17 +2,21 @@
 
 This file is for AI agents (OpenClaw, Claude Code, etc.) that need to integrate with or control the matrix-voip-agent voice call system. Read this file to understand the system's capabilities, APIs, and how to interact with it.
 
+> Deploying the system itself (homeserver, TURN, STT/TTS sidecars, LLM, per-persona units)? That runbook is **[AGENTS.md](AGENTS.md)**.
+
 ---
 
 ## What This System Does
 
-This is a headless voice call agent for Matrix. It answers incoming VoIP calls and can initiate outbound calls. During a call, it:
+This is a headless voice (and optionally video) call agent for Matrix. It answers incoming VoIP calls and can initiate outbound calls. During a call, it:
 
 1. Listens to the caller via WebRTC
-2. Transcribes speech locally using whisper.cpp
+2. Transcribes speech locally (whisper.cpp, or an OpenAI-compatible ASR server such as qwen3-asr-server)
 3. Sends the transcript to an LLM (via OpenAI-compatible API)
-4. Speaks the LLM response back using ElevenLabs TTS
+4. Speaks the LLM response back via TTS (an OpenAI-compatible TTS server such as qwen3-tts-server, or ElevenLabs)
 5. Saves a full transcript when the call ends
+
+With the video add-on enabled (`VIDEO_ENABLED=true`) and a classic 1:1 video call, the agent also samples camera frames into an in-memory ring buffer and the LLM can see through the caller's camera via the `look` tool. Frames are never written to disk; transcripts stay text-only.
 
 The voice pipeline bypasses Matrix for the conversation loop — Matrix is only used for call signaling (ringing, answering, hanging up).
 
@@ -93,6 +97,7 @@ When the agent is on a call, the LLM has these tools available:
 | `run_command` | Runs a shell command and returns output | Caller asks about system info (disk, uptime, processes) |
 | `web_search` | Searches the web via Brave Search | Caller asks about news, weather, facts, current events |
 | `send_message` | Sends a text message to the Matrix room | Caller asks to post something in the chat |
+| `look` | Returns 1–4 camera frames from the in-memory ring buffer as images (`frames`, `spread_seconds`) | Video calls only — registered per-call when the call has a live video track. Caller asks "what do you see?" or shows something to the camera |
 
 Tools execute in the background while the agent speaks a filler phrase (e.g., "Let me check on that."). The tool result is then used to generate the spoken response.
 
@@ -109,11 +114,11 @@ After every call, transcripts are saved to:
 ```json
 {
   "callStart": "2026-03-29T07:00:00.000Z",
-  "caller": "@albert:matrix.unhash.me",
+  "caller": "@user:your-homeserver.example.com",
   "sttMode": "whisper",
   "transcript": [
-    {"timestamp": "2026-03-29T07:00:05.000Z", "speaker": "user", "text": "Hey Celina, what time is it?"},
-    {"timestamp": "2026-03-29T07:00:12.000Z", "speaker": "celina", "text": "It's 3 AM on Saturday, March 29th."}
+    {"timestamp": "2026-03-29T07:00:05.000Z", "speaker": "user", "text": "Hey, what time is it?"},
+    {"timestamp": "2026-03-29T07:00:12.000Z", "speaker": "agent", "text": "It's 3 AM on Saturday, March 29th."}
   ]
 }
 ```
@@ -200,10 +205,12 @@ Voice agent (this machine):
   :8179  ← Voice agent API (outbound calls, localhost)
   :3478  ← coturn TURN server (LAN/public)
 
-Remote:
-  vLLM server   → LLM inference (OpenAI-compatible API)
-  ElevenLabs    → Text-to-speech (cloud API)
-  Brave Search  → Web search (cloud API, optional)
+Remote (LAN or cloud):
+  vLLM server       → LLM inference (OpenAI-compatible API; vision-capable model for video)
+  qwen3-asr-server  → STT, OpenAI-compatible /v1/audio/transcriptions (optional, OMNI_ASR_*)
+  qwen3-tts-server  → TTS, OpenAI-compatible /v1/audio/speech (optional, VOXTRAL_*)
+  ElevenLabs        → Text-to-speech (cloud API, alternative to local TTS)
+  Brave Search      → Web search (cloud API, optional)
 ```
 
 ---
